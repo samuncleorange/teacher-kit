@@ -124,6 +124,7 @@
   </footer>
 
   <script src="/static/garden.js"></script>
+  <script src="/static/relay.js"></script>
   <script>
   (function () {
     'use strict';
@@ -339,10 +340,12 @@
 
     // ====================== WebRTC answer (student side) ======================
 
-    let pc = null;            // RTCPeerConnection
+    let pc = null;            // RTCPeerConnection (used in P2P mode)
     let callStream = null;    // separate getUserMedia stream for the call (camera+mic, EC on)
     let pendingIce = [];      // ICE candidates that arrived before we set remote desc
     let routeProbeTimer = null;
+    let relay = null;         // QGRelay.WSRelay (used in server-relay mode)
+    let callMode = 'idle';    // 'idle' | 'p2p' | 'relay'
 
     async function handleSignal(msg) {
       if (!msg || msg.from === 'student') return; // ignore our own
@@ -356,11 +359,63 @@
             pendingIce.push(msg.data);
           }
         }
+      } else if (msg.type === 'fallback-relay') {
+        // Teacher couldn't establish P2P — switch to server WebSocket relay.
+        await switchToRelay();
       } else if (msg.type === 'hangup') {
         showCallBanner('老师已挂断。');
         setTimeout(() => { remoteCallBanner.hidden = true; }, 1500);
         cleanupCall();
       }
+    }
+
+    async function switchToRelay() {
+      // Tear down any in-flight P2P attempt.
+      if (pc) { try { pc.close(); } catch (_) {} pc = null; }
+      if (routeProbeTimer) { clearInterval(routeProbeTimer); routeProbeTimer = null; }
+      callMode = 'relay';
+      showCallBanner('🛰 P2P 连不上，切换到服务器中转，正在打开摄像头…');
+
+      // We may already have a callStream from the P2P attempt — reuse if so.
+      if (!callStream) {
+        try {
+          callStream = await navigator.mediaDevices.getUserMedia({
+            video: { width: { ideal: 640 }, height: { ideal: 480 }, facingMode: 'user' },
+            audio: { echoCancellation: true, noiseSuppression: true, autoGainControl: true },
+          });
+        } catch (err) {
+          showCallBanner('⚠ 无法打开摄像头/麦克风：' + (err.message || err));
+          cleanupCall();
+          return;
+        }
+      }
+
+      // Make sure there's a hidden audio sink for incoming teacher voice.
+      let audioEl = document.getElementById('teacherAudio');
+      if (!audioEl) {
+        audioEl = document.createElement('audio');
+        audioEl.id = 'teacherAudio';
+        audioEl.autoplay = true;
+        audioEl.playsInline = true;
+        document.body.appendChild(audioEl);
+      }
+
+      relay = new QGRelay.WSRelay(activePin, 'student');
+      relay.attachReceiver(audioEl);
+      relay.onError = (e) => showCallBanner('⚠ 中转出错：' + (e.message || e));
+      relay.onClose = () => { /* server may close peer end; cleanup happens on hangup */ };
+      relay.onReceiveStarted = () => {
+        showCallBanner('🎥 老师正在远程查看 + 对讲 · 🛰 服务器中转');
+      };
+      try {
+        await relay.open();
+      } catch (e) {
+        showCallBanner('⚠ 无法连上中转通道：' + (e.message || e));
+        cleanupCall();
+        return;
+      }
+      relay.startSending(callStream, /*hasVideo=*/true);
+      showCallBanner('🛰 已上线服务器中转，等待老师端接通…');
     }
 
     function showCallBanner(text) {
@@ -370,6 +425,7 @@
 
     async function acceptCall(offer) {
       if (pc) { cleanupCall(); }
+      callMode = 'p2p';
       showCallBanner('📹 老师请求查看课堂，正在打开摄像头与麦克风…');
       try {
         callStream = await navigator.mediaDevices.getUserMedia({
@@ -435,11 +491,16 @@
 
     function cleanupCall() {
       if (pc) { try { pc.close(); } catch (_) {} pc = null; }
+      if (relay) { try { relay.close(); } catch (_) {} relay = null; }
       if (callStream) { callStream.getTracks().forEach(t => t.stop()); callStream = null; }
       const audioEl = document.getElementById('teacherAudio');
-      if (audioEl) audioEl.srcObject = null;
+      if (audioEl) {
+        try { audioEl.srcObject = null; audioEl.removeAttribute('src'); audioEl.load(); }
+        catch (_) {}
+      }
       pendingIce = [];
       if (routeProbeTimer) { clearInterval(routeProbeTimer); routeProbeTimer = null; }
+      callMode = 'idle';
     }
 
     function sendStudentSignal(type, data) {
@@ -452,10 +513,12 @@
     }
 
     hangupRemoteBtn.addEventListener('click', () => {
+      // Always tell teacher we're hanging up (works for both p2p & relay modes).
       sendStudentSignal('hangup', null);
       remoteCallBanner.hidden = true;
       cleanupCall();
     });
+    window.addEventListener('beforeunload', () => { try { cleanupCall(); } catch (_) {} });
 
     function applyServerState(st) {
       serverState = st;

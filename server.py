@@ -9,12 +9,15 @@
 - Bark notifications when dB stays above alert threshold for alertSeconds
 """
 
+import base64
+import hashlib
 import http.server
 import json
 import os
 import queue
 import re
 import socketserver
+import struct
 import sys
 import threading
 import time
@@ -486,6 +489,85 @@ def persist_all_settings() -> None:
 
 
 # ============================================================
+# WebSocket relay (server-side fallback when P2P fails)
+# ============================================================
+#
+# Implements just enough of RFC 6455 to relay binary frames between two
+# peers (teacher + student) of the same class. The server doesn't decode
+# or store any media — it's a dumb pass-through. Combined with the
+# reverse proxy's HTTPS termination, this lets WebRTC fail-over to
+# server relay without needing a separate TURN service.
+#
+# Protocol on the wire is exactly WebSocket binary frames carrying
+# MediaRecorder chunks (e.g. webm/vp8+opus). Clients decode using
+# MediaSource on a <video>/<audio> element.
+
+_WS_MAGIC = "258EAFA5-E914-47DA-95CA-C5AB0DC85B11"
+WS_OP_CONT, WS_OP_TEXT, WS_OP_BIN = 0x0, 0x1, 0x2
+WS_OP_CLOSE, WS_OP_PING, WS_OP_PONG = 0x8, 0x9, 0xA
+
+# {pin: {role: handler_instance}} — protected by RELAY_LOCK
+RELAY_HUB: "Dict[str, Dict[str, object]]" = {}
+RELAY_LOCK = threading.Lock()
+
+
+def ws_compute_accept(key: str) -> str:
+    """RFC 6455 Sec-WebSocket-Accept derivation."""
+    h = hashlib.sha1((key + _WS_MAGIC).encode("ascii")).digest()
+    return base64.b64encode(h).decode("ascii")
+
+
+def ws_recv_frame(rfile):
+    """Read one WebSocket frame.
+
+    Returns (opcode, payload_bytes, fin) or None on EOF / malformed.
+    Handles fragmentation lazily (caller may need to reassemble; for our
+    relay use-case MediaRecorder produces one chunk per frame).
+    """
+    head = rfile.read(2)
+    if len(head) < 2:
+        return None
+    b1, b2 = head[0], head[1]
+    fin = (b1 & 0x80) != 0
+    opcode = b1 & 0x0F
+    masked = (b2 & 0x80) != 0
+    plen = b2 & 0x7F
+    if plen == 126:
+        ext = rfile.read(2)
+        if len(ext) < 2:
+            return None
+        plen = struct.unpack(">H", ext)[0]
+    elif plen == 127:
+        ext = rfile.read(8)
+        if len(ext) < 8:
+            return None
+        plen = struct.unpack(">Q", ext)[0]
+    if plen > 16 * 1024 * 1024:  # 16 MiB hard cap per frame
+        return None
+    mask = rfile.read(4) if masked else None
+    data = rfile.read(plen) if plen else b""
+    if len(data) < plen:
+        return None
+    if masked and mask:
+        data = bytes(b ^ mask[i % 4] for i, b in enumerate(data))
+    return (opcode, data, fin)
+
+
+def ws_send_frame(wfile, opcode: int, data: bytes = b"") -> None:
+    """Write one WebSocket frame (server → client, no mask)."""
+    b1 = 0x80 | (opcode & 0x0F)
+    plen = len(data)
+    if plen < 126:
+        header = bytes([b1, plen])
+    elif plen < (1 << 16):
+        header = bytes([b1, 126]) + struct.pack(">H", plen)
+    else:
+        header = bytes([b1, 127]) + struct.pack(">Q", plen)
+    wfile.write(header + data)
+    wfile.flush()
+
+
+# ============================================================
 # Periodic tick — broadcasts state every second so streak progress
 # advances on subscriber UIs even between samples.
 # ============================================================
@@ -600,6 +682,11 @@ class Handler(http.server.BaseHTTPRequestHandler):
         m = re.match(r"^/api/stream/(\d{4})$", path)
         if m:
             return self._handle_sse(m.group(1))
+
+        # WebSocket relay: GET /api/relay/<pin>/<role>  (Upgrade: websocket)
+        m = re.match(r"^/api/relay/(\d{4})/(teacher|student)$", path)
+        if m:
+            return self._handle_relay(m.group(1), m.group(2))
 
         return self._send_404()
 
@@ -738,6 +825,121 @@ class Handler(http.server.BaseHTTPRequestHandler):
         out.append("\n")
         self.wfile.write("".join(out).encode("utf-8"))
         self.wfile.flush()
+
+    # ---------- WebSocket relay ----------
+
+    def _handle_relay(self, pin: str, role: str):
+        """Hijack the connection for a WebSocket session that relays binary
+        frames to the opposite peer in the same class."""
+        upg = (self.headers.get("Upgrade") or "").lower()
+        conn = (self.headers.get("Connection") or "").lower()
+        ws_key = self.headers.get("Sec-WebSocket-Key") or ""
+        if "websocket" not in upg or "upgrade" not in conn or not ws_key:
+            return self._send_simple(400, body="not a websocket request")
+
+        accept = ws_compute_accept(ws_key.strip())
+        # Tell the framework we'll keep talking on the socket: don't auto-close.
+        self.close_connection = True  # we'll close manually at end
+        self.send_response(101, "Switching Protocols")
+        self.send_header("Upgrade", "websocket")
+        self.send_header("Connection", "Upgrade")
+        self.send_header("Sec-WebSocket-Accept", accept)
+        self.end_headers()
+
+        # Register self as this PIN's <role>; if a previous one is registered,
+        # close it (probably a stale tab).
+        peer_role = "student" if role == "teacher" else "teacher"
+        prev = None
+        with RELAY_LOCK:
+            peers = RELAY_HUB.setdefault(pin, {})
+            prev = peers.get(role)
+            peers[role] = self
+            other = peers.get(peer_role)
+
+        if prev is not None and prev is not self:
+            try:
+                ws_send_frame(prev.wfile, WS_OP_CLOSE, b"\x03\xe8")  # 1000 normal
+            except Exception:
+                pass
+            try:
+                prev.connection.close()
+            except Exception:
+                pass
+
+        # Notify both peers about who's online via a tiny JSON text frame.
+        # Clients use this to know when to start sending media.
+        def notify_status():
+            with RELAY_LOCK:
+                peers = RELAY_HUB.get(pin, {})
+                t_on = "teacher" in peers
+                s_on = "student" in peers
+                snapshot = list(peers.items())
+            msg = json.dumps({
+                "type": "peer-status",
+                "teacher": t_on,
+                "student": s_on,
+            }).encode("utf-8")
+            for r, h in snapshot:
+                try:
+                    ws_send_frame(h.wfile, WS_OP_TEXT, msg)
+                except Exception:
+                    pass
+
+        notify_status()
+
+        try:
+            while True:
+                frame = ws_recv_frame(self.rfile)
+                if frame is None:
+                    break
+                opcode, data, _fin = frame
+                if opcode == WS_OP_CLOSE:
+                    try:
+                        ws_send_frame(self.wfile, WS_OP_CLOSE, data[:125])
+                    except Exception:
+                        pass
+                    break
+                if opcode == WS_OP_PING:
+                    try:
+                        ws_send_frame(self.wfile, WS_OP_PONG, data)
+                    except Exception:
+                        pass
+                    continue
+                if opcode == WS_OP_PONG:
+                    continue
+                if opcode in (WS_OP_TEXT, WS_OP_BIN, WS_OP_CONT):
+                    # Forward to the other role.
+                    with RELAY_LOCK:
+                        peers = RELAY_HUB.get(pin, {})
+                        target = peers.get(peer_role)
+                    if target is not None and target is not self:
+                        try:
+                            ws_send_frame(target.wfile, opcode, data)
+                        except Exception:
+                            # Target's socket is broken; drop it and notify us.
+                            with RELAY_LOCK:
+                                peers = RELAY_HUB.get(pin, {})
+                                if peers.get(peer_role) is target:
+                                    peers.pop(peer_role, None)
+                            try:
+                                target.connection.close()
+                            except Exception:
+                                pass
+                            notify_status()
+        except (BrokenPipeError, ConnectionResetError, ConnectionAbortedError, OSError):
+            pass
+        finally:
+            with RELAY_LOCK:
+                peers = RELAY_HUB.get(pin, {})
+                if peers.get(role) is self:
+                    peers.pop(role, None)
+                    if not peers:
+                        RELAY_HUB.pop(pin, None)
+            # Tell the surviving peer (if any) we're gone.
+            try:
+                notify_status()
+            except Exception:
+                pass
 
 
 # ============================================================

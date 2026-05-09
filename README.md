@@ -94,15 +94,74 @@
 
 时间按服务器本地时间，请将服务器时区设置为学校所在时区（例如：`TZ=Asia/Shanghai python3 server.py`）。
 
-### 4. **远程摄像头 + 双向对讲** 🆕（按需开启 · P2P 优先 · TURN 中转兜底）
-为了节省流量，**摄像头/麦克风默认是关闭的**，仅当老师点击「开始连接」时才会临时启用：
+### 4. **远程摄像头 + 双向对讲** 🆕（按需开启 · 自动 P2P → 服务器中转兜底）
+为了节省流量，**摄像头/麦克风默认是关闭的**，仅当老师点击「开始连接」时才会临时启用。
 
-- 通过 **WebRTC** 建立连接，**优先 P2P 直连**——音视频不经过服务器，零流量成本
-- ICE 自动协商：**直连失败时自动 fall back 到 TURN 中转**（需自行部署或填入第三方 TURN）
-- 老师端 + 学生端都会显示 `🏠 直连` / `🌐 P2P 穿透 NAT` / `🛰 服务器中转` 实时徽章，一眼看懂当前走的什么路径
-- 双向对讲：老师麦克风 ⇄ 课堂麦克风（默认开 echoCancellation 防回声）
+**自动两段式连接策略**（无需任何配置即可全自动）：
+
+| 阶段 | 走什么 | 流量 | 何时使用 |
+|---|---|---|---|
+| 1️⃣ P2P 直连 | WebRTC + STUN | **零服务器流量** | 默认尝试，给 8 秒窗口 |
+| 2️⃣ 服务器中转 | **WebSocket + MediaRecorder/MediaSource** | 走你自己的反代 HTTPS | P2P 8 秒未连上自动切换 |
+
+- 老师端 + 学生端徽章实时显示 `🏠 直连` / `🌐 P2P 穿透 NAT` / `🛰 服务器中转（WebSocket）`
+- 双向对讲：老师麦克风 ⇄ 课堂麦克风（默认开 `echoCancellation` 防回声）
 - 任意一方点击「挂断」即立刻关闭摄像头与上行流量
-- TURN 部署：参见 [`docs/coturn-setup.md`](docs/coturn-setup.md)（5 分钟版 apt 一键搞定）
+- **无需 TURN / coturn**——服务器中转直接复用现成的 HTTPS 反向代理通道；
+  仍提供 TURN 字段作为可选项，需要标准协议兼容时使用，详见
+  [`docs/coturn-setup.md`](docs/coturn-setup.md)
+
+#### 反向代理需要支持 WebSocket 升级
+
+服务器中转走 `wss:///api/relay/<pin>/<role>`，反代必须放行 `Upgrade: websocket`：
+
+<details>
+<summary><b>nginx 示例（已加 WebSocket 升级头）</b></summary>
+
+```nginx
+# /etc/nginx/sites-available/quiet.vim.im
+map $http_upgrade $connection_upgrade {
+    default upgrade;
+    ''      close;
+}
+
+server {
+    listen 443 ssl http2;
+    server_name quiet.vim.im;
+
+    ssl_certificate     /etc/letsencrypt/live/quiet.vim.im/fullchain.pem;
+    ssl_certificate_key /etc/letsencrypt/live/quiet.vim.im/privkey.pem;
+
+    # 让 SSE 与 WebSocket 都能长连接、不被代理缓冲
+    proxy_http_version 1.1;
+    proxy_set_header Host              $host;
+    proxy_set_header X-Real-IP         $remote_addr;
+    proxy_set_header X-Forwarded-For   $proxy_add_x_forwarded_for;
+    proxy_set_header X-Forwarded-Proto $scheme;
+    proxy_set_header Upgrade           $http_upgrade;
+    proxy_set_header Connection        $connection_upgrade;
+    proxy_buffering    off;
+    proxy_read_timeout 1d;        # SSE/WS 都得长保活
+    proxy_send_timeout 1d;
+
+    location / {
+        proxy_pass http://127.0.0.1:55556;
+    }
+}
+```
+</details>
+
+<details>
+<summary><b>Caddy 示例（自动支持 WebSocket，几乎免配）</b></summary>
+
+```caddyfile
+quiet.vim.im {
+    reverse_proxy 127.0.0.1:55556 {
+        flush_interval -1            # 让 SSE 立即透传，不要缓冲
+    }
+}
+```
+</details>
 
 ### 5. Bark 推送
 - 老师端填入 Bark URL（iOS App 提供）
@@ -200,16 +259,18 @@ python3 server.py
 | POST | `/api/signal/<pin>` | 转发 WebRTC offer/answer/ice/hangup |
 | POST | `/api/test-bark/<pin>` | 测试 Bark 推送 |
 | POST | `/api/reset` | 重置花园：`{pin}` |
+| WS   | `/api/relay/<pin>/<role>` | WebSocket 媒体中转（role=teacher/student），二进制帧 = MediaRecorder 输出 |
 
-### TURN / WebRTC ICE 配置（settings 字段）
+### TURN / WebRTC ICE 配置（可选 · settings 字段）
 ```json
 "turnUrl":        "turn:你的域名:3478?transport=udp,turn:你的域名:3478?transport=tcp",
 "turnUsername":   "quiet",
 "turnCredential": "你设的强密码"
 ```
-- 留空：仅使用公共 STUN（P2P-only，复杂 NAT 下会失败）
-- 填入：ICE 仍然**优先 P2P 直连**，仅当直连失败才走 TURN 中转
-- 多条 URI 用逗号或空白分隔（一般同时配 UDP + TCP 备用）
+- 留空 ✅：仅使用公共 STUN 做 P2P；P2P 失败时**自动走 WebSocket 中转**（推荐，零额外组件）
+- 填入：ICE 也会尝试 TURN 路径——这是给「想保留标准 WebRTC 协议」的用户准备的备选
+
+> 默认 WebSocket 中转模式已经能解决 99% 的 NAT 问题，**绝大多数人不需要部署 TURN**。仅当你想完整保留 WebRTC 协议栈（比如未来扩展数据通道功能）时才需要。
 
 ### 课表数据格式
 ```json
@@ -233,7 +294,8 @@ quiet-tree/
 │   ├── index.html                  # 学生端
 │   ├── teacher.html                # 老师监控台
 │   ├── style.css                   # 共享样式（含手机端响应式）
-│   └── garden.js                   # 花园渲染共享逻辑（pineSvg / renderTrees / …）
+│   ├── garden.js                   # 花园渲染 + WebRTC 共享逻辑
+│   └── relay.js                    # WebSocket 服务器中转（MediaRecorder/MediaSource）
 ├── tools/
 │   ├── screenshot_demo_server.py   # 截图用的 demo 服务（预置花园+课表）
 │   └── screenshots.js              # puppeteer-core 自动批量截图
@@ -271,8 +333,9 @@ A: 检查（按命中概率排序）：
 1. 学生端是否在线（老师端右上角小绿点）
 2. 学生端浏览器是否同意了摄像头/麦克风权限
 3. 老师端 + 学生端是否都走 HTTPS / localhost（http+IP 浏览器会拒绝）
-4. **跨网络且 P2P 失败** → 老师端展开「⚙ 高级：TURN 中转配置」，填入 TURN URI/用户/密码。如还没有 TURN 服务器，照着 [`docs/coturn-setup.md`](docs/coturn-setup.md) 5 分钟装一套即可
-5. 看徽章：连上后会显示 `🏠 直连 / 🌐 P2P / 🛰 中转`，能直接定位是直连失败还是中转失败
+4. **反代是否放行了 `Upgrade: websocket`**：服务器中转兜底走 `wss://`，nginx 默认会断 WebSocket，参见上面的「反向代理需要支持 WebSocket 升级」配置
+5. 看徽章：8 秒后会自动从 P2P 切到服务器中转。徽章稳定显示 `🛰 服务器中转（WebSocket）` 即说明走中转成功
+6. 浏览器需支持 `MediaRecorder + MediaSource` 的同款编码（webm/vp8+opus）。Chrome / Firefox / Edge 都行；Safari iOS 暂不完整支持，建议教室那台设备用 Chrome 系内核
 
 **Q: 课表时间不准？**
 A: 服务器使用本地时间。在云服务器上务必设置时区，例如：

@@ -205,6 +205,7 @@
   </footer>
 
   <script src="/static/garden.js"></script>
+  <script src="/static/relay.js"></script>
   <script>
   (function () {
     'use strict';
@@ -546,22 +547,38 @@
       scheduleSave();
     });
 
-    // ====================== WebRTC: teacher initiates ======================
+    // ====================== Call orchestration (P2P → server relay) ======================
+    //
+    // Flow when teacher clicks 「开始连接」:
+    //   1. Get teacher's mic via getUserMedia.
+    //   2. Try WebRTC P2P. If RTCPeerConnection.connectionState reaches
+    //      'connected' within P2P_TIMEOUT_MS, we're done — show 直连 badge.
+    //   3. Otherwise close pc, send {type:'fallback-relay'} via SSE,
+    //      open WSRelay over /api/relay/<pin>/teacher, and stream mic
+    //      while receiving student's video+audio via MediaSource.
 
-    let pc = null;
-    let localStream = null;
-    let routeTimer = null;
+    const P2P_TIMEOUT_MS = 8000;     // give P2P 8 seconds before falling back
     const webrtcRoute = $('webrtcRoute');
+
+    let pc = null;                   // RTCPeerConnection
+    let localStream = null;          // teacher's mic stream
+    let routeTimer = null;
+    let p2pTimer = null;
+    let mode = 'idle';               // 'idle' | 'p2p' | 'relay'
+    let relay = null;                // QGRelay.WSRelay instance when in relay mode
 
     function setWebrtcStatus(text, kind) {
       webrtcStatus.textContent = text;
       webrtcStatus.className = 'webrtc-status' + (kind ? ' ' + kind : '');
     }
-    function setRouteBadge(type) {
-      const d = QG.describeConnectionType(type);
+    function setRouteBadge(text, cls) {
       webrtcRoute.hidden = false;
-      webrtcRoute.textContent = d.text;
-      webrtcRoute.className = 'webrtc-route' + (d.cls ? ' ' + d.cls : '');
+      webrtcRoute.textContent = text;
+      webrtcRoute.className = 'webrtc-route' + (cls ? ' ' + cls : '');
+    }
+    function setRouteBadgeFromIce(type) {
+      const d = QG.describeConnectionType(type);
+      setRouteBadge(d.text, d.cls);
     }
     function clearRouteBadge() {
       webrtcRoute.hidden = true; webrtcRoute.textContent = '';
@@ -569,7 +586,7 @@
     }
 
     async function startCall() {
-      if (pc) return;
+      if (mode !== 'idle') return;
       if (!lastState || !lastState.online) {
         setWebrtcStatus('学生端离线，无法连接', 'err');
         return;
@@ -584,13 +601,14 @@
         setWebrtcStatus('无法获取本机麦克风：' + (err.message || err), 'err');
         return;
       }
-      // Build ICE config from current settings (STUN + optional TURN).
+      mode = 'p2p';
+      callBtn.disabled = true;
+      await tryP2P();
+    }
+
+    async function tryP2P() {
       const iceServers = QG.buildIceServers(lastState && lastState.settings);
-      pc = new RTCPeerConnection({
-        iceServers,
-        // 'all' = try direct first, fall back to TURN relay if direct fails.
-        iceTransportPolicy: 'all',
-      });
+      pc = new RTCPeerConnection({ iceServers, iceTransportPolicy: 'all' });
       localStream.getTracks().forEach(t => pc.addTrack(t, localStream));
       try { pc.addTransceiver('video', { direction: 'recvonly' }); } catch (_) {}
 
@@ -606,29 +624,25 @@
         if (e.candidate) sendSignal('ice', e.candidate.toJSON());
       };
       pc.onconnectionstatechange = async () => {
-        if (!pc) return;
+        if (!pc || mode !== 'p2p') return;
         const s = pc.connectionState;
         if (s === 'connected') {
+          if (p2pTimer) { clearTimeout(p2pTimer); p2pTimer = null; }
           setWebrtcStatus('✅ 已连接', 'ok');
           hangupBtn.disabled = false;
           muteBtn.disabled = false;
-          // Probe how the connection was established and re-probe periodically
-          // (ICE can renegotiate from direct → relay if direct path drops).
           const update = async () => {
             const t = await QG.probeConnectionType(pc);
-            setRouteBadge(t);
+            setRouteBadgeFromIce(t);
           };
           await update();
           if (routeTimer) clearInterval(routeTimer);
           routeTimer = setInterval(update, 5000);
         } else if (s === 'connecting') {
-          setWebrtcStatus('正在协商连接…');
+          setWebrtcStatus('正在协商 P2P 连接…');
         } else if (s === 'failed') {
-          setWebrtcStatus('连接失败（无可用直连路径，且未配置 TURN）', 'err');
-          cleanupCall();
-        } else if (s === 'disconnected' || s === 'closed') {
-          setWebrtcStatus('已断开');
-          cleanupCall();
+          // Direct path impossible — fall back to server relay.
+          fallbackToRelay('P2P 连接失败');
         }
       };
 
@@ -637,17 +651,69 @@
         await pc.setLocalDescription(offer);
         sendSignal('offer', { sdp: pc.localDescription.sdp, type: pc.localDescription.type });
         setWebrtcStatus('已发出连接请求，等待学生端接受…');
-        callBtn.disabled = true;
       } catch (e) {
-        setWebrtcStatus('创建 offer 失败：' + e.message, 'err');
-        cleanupCall();
+        fallbackToRelay('创建 offer 失败：' + e.message);
+        return;
       }
+
+      // Hard 8-second deadline for P2P; otherwise switch to relay.
+      if (p2pTimer) clearTimeout(p2pTimer);
+      p2pTimer = setTimeout(() => {
+        if (mode === 'p2p' && pc && pc.connectionState !== 'connected') {
+          fallbackToRelay('P2P ' + (P2P_TIMEOUT_MS / 1000) + ' 秒未连上');
+        }
+      }, P2P_TIMEOUT_MS);
+    }
+
+    async function fallbackToRelay(reason) {
+      if (mode === 'relay') return;
+      mode = 'relay';
+      if (p2pTimer) { clearTimeout(p2pTimer); p2pTimer = null; }
+      if (pc) { try { pc.close(); } catch (_) {} pc = null; }
+      remoteAudio.srcObject = null;
+      // Tell student to abandon WebRTC and open WS relay instead.
+      sendSignal('fallback-relay', null);
+      setWebrtcStatus(reason + ' · 切换到服务器中转…');
+      await startRelay();
+    }
+
+    async function startRelay() {
+      relay = new QGRelay.WSRelay(PIN, 'teacher');
+      relay.attachReceiver(remoteVideo);
+      relay.onError = (e) => setWebrtcStatus('中转出错：' + (e.message || e), 'err');
+      relay.onClose = () => {
+        if (mode === 'relay') setWebrtcStatus('中转连接已关闭');
+      };
+      relay.onPeerStatus = (s) => {
+        if (s.student) {
+          setWebrtcStatus('🛰 服务器中转 · 等待学生端打开摄像头…');
+        }
+      };
+      relay.onReceiveStarted = () => {
+        webrtcOverlay.style.display = 'none';
+        setWebrtcStatus('✅ 已连接（服务器中转）', 'ok');
+        hangupBtn.disabled = false;
+        muteBtn.disabled = false;
+      };
+      try {
+        await relay.open();
+      } catch (e) {
+        setWebrtcStatus('无法连上中转 WebSocket：' + (e.message || e), 'err');
+        cleanupCall();
+        return;
+      }
+      // Teacher sends mic only.
+      relay.startSending(localStream, /*hasVideo=*/false);
+      setRouteBadge('🛰 服务器中转（WebSocket）', 'warn');
     }
 
     function cleanupCall() {
+      if (p2pTimer) { clearTimeout(p2pTimer); p2pTimer = null; }
       if (pc) { try { pc.close(); } catch (_) {} pc = null; }
+      if (relay) { try { relay.close(); } catch (_) {} relay = null; }
       if (localStream) { localStream.getTracks().forEach(t => t.stop()); localStream = null; }
       remoteVideo.srcObject = null;
+      try { remoteVideo.removeAttribute('src'); remoteVideo.load(); } catch (_) {}
       remoteAudio.srcObject = null;
       webrtcOverlay.style.display = '';
       callBtn.disabled = false;
@@ -655,6 +721,7 @@
       muteBtn.disabled = true;
       muteBtn.textContent = '🔇 静音我';
       clearRouteBadge();
+      mode = 'idle';
     }
 
     function sendSignal(type, data) {
