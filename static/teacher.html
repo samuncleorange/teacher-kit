@@ -1,0 +1,689 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>老师监控 · 安静花园</title>
+<link rel="stylesheet" href="/static/style.css">
+</head>
+<body>
+  <header>
+    <h1><span class="emoji">👩‍🏫</span> 老师监控台 <span class="emoji">📊</span></h1>
+    <p class="slogan">远程查看本班实时分贝 · 调节阈值 · Bark 通知到手机</p>
+    <div>
+      <span class="pin-badge">
+        <span class="role-tag">老师端</span>
+        班级 PIN: <strong id="pinDisplay">----</strong>
+        <span class="online-dot" id="onlineDot"></span>
+        <span id="onlineLabel" style="font-size:12px;color:#4a6a85;">未连接</span>
+        <span class="schedule-pill" id="schedulePill" hidden></span>
+      </span>
+    </div>
+  </header>
+
+  <main>
+    <!-- Status -->
+    <section class="card status-card">
+      <div class="db-display">
+        <span class="db-label">班级实时分贝</span>
+        <span class="db-value offline" id="dbValue">--</span>
+        <span class="db-unit">dB</span>
+      </div>
+      <div class="meter-wrapper">
+        <div class="db-meter">
+          <div class="db-bar" id="dbBar"></div>
+          <div class="db-marker quiet-marker" id="quietMarker">
+            <span class="marker-label">安静线</span>
+          </div>
+          <div class="db-marker loud-marker" id="loudMarker">
+            <span class="marker-label">吵闹线</span>
+          </div>
+        </div>
+        <div class="progress-info">
+          <span class="status-text" id="statusText">
+            <span class="pill offline">未连接</span>等待学生端发送数据…
+          </span>
+          <div class="progress-bar">
+            <div class="progress-fill" id="progressFill"></div>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <!-- Garden -->
+    <section class="card" style="padding: 0; overflow: hidden;">
+      <div class="garden" id="garden">
+        <div class="sun"></div>
+        <div class="hill-back"></div>
+        <div class="hill-front"></div>
+        <div class="grass"></div>
+        <div class="trees" id="trees"></div>
+        <div class="empty-hint" id="emptyHint">花园还是空的，等待小树生长 🌱</div>
+      </div>
+    </section>
+
+    <div class="stats">
+      <span class="stat">小松树：<strong id="statSmall">0</strong></span>
+      <span class="stat">中松树：<strong id="statMedium">0</strong></span>
+      <span class="stat">大松树：<strong id="statLarge">0</strong></span>
+      <span class="stat">参天松：<strong id="statHuge">0</strong></span>
+    </div>
+
+    <!-- Threshold settings -->
+    <section class="card">
+      <div class="card-title">🎚️ 阈值设置（修改会即时同步给学生端）</div>
+      <div class="controls">
+        <div class="setting">
+          <label>🤫 安静目标</label>
+          <div class="stepper">
+            <button class="step" type="button" data-target="quietTarget" data-delta="-5">−</button>
+            <input type="number" id="quietTarget" min="0" max="120" step="1">
+            <button class="step" type="button" data-target="quietTarget" data-delta="5">+</button>
+          </div>
+          <span class="unit">dB · 持续 60s 长树</span>
+        </div>
+        <div class="setting">
+          <label>📢 吵闹阈值</label>
+          <div class="stepper">
+            <button class="step" type="button" data-target="loudTarget" data-delta="-5">−</button>
+            <input type="number" id="loudTarget" min="0" max="120" step="1">
+            <button class="step" type="button" data-target="loudTarget" data-delta="5">+</button>
+          </div>
+          <span class="unit">dB · 持续 60s 失树</span>
+        </div>
+        <div class="buttons">
+          <button id="resetGardenBtn" class="btn btn-ghost btn-small">🌿 重置花园</button>
+        </div>
+      </div>
+    </section>
+
+    <!-- Bark notification settings -->
+    <section class="card">
+      <div class="card-title">📱 Bark 推送通知（手机端）</div>
+      <div class="controls">
+        <div class="setting full">
+          <label>🔗 Bark 链接</label>
+          <input type="url" id="barkUrl"
+                 placeholder="例如：https://api.day.app/你的设备key"
+                 autocomplete="off">
+        </div>
+        <div class="setting">
+          <label>🚨 告警分贝</label>
+          <div class="stepper">
+            <button class="step" type="button" data-target="alertDb" data-delta="-5">−</button>
+            <input type="number" id="alertDb" min="0" max="120" step="1">
+            <button class="step" type="button" data-target="alertDb" data-delta="5">+</button>
+          </div>
+          <span class="unit">dB</span>
+        </div>
+        <div class="setting">
+          <label>⏱ 持续时间</label>
+          <div class="stepper">
+            <button class="step" type="button" data-target="alertSeconds" data-delta="-10">−</button>
+            <input type="number" id="alertSeconds" min="5" max="3600" step="5">
+            <button class="step" type="button" data-target="alertSeconds" data-delta="10">+</button>
+          </div>
+          <span class="unit">秒</span>
+        </div>
+        <div class="buttons">
+          <button id="testBarkBtn" class="btn btn-ghost btn-small">📨 发送测试通知</button>
+        </div>
+      </div>
+      <div class="bark-status" id="barkStatus">提示：在手机上安装 Bark App，复制其中的 URL 粘贴到上面，再点击「发送测试通知」验证。</div>
+    </section>
+
+    <!-- ============ 监听时段 ============ -->
+    <section class="card">
+      <div class="card-title">📅 监听时段（按周循环）</div>
+      <div class="schedule-meta" id="scheduleMeta">
+        当前服务器时间 <strong id="serverNowDisplay">--</strong> ·
+        <span id="scheduleSummary">尚未设置任何时段，将始终监听。</span>
+      </div>
+      <div class="schedule-list" id="scheduleList"></div>
+      <div class="schedule-actions">
+        <button id="addScheduleBtn" class="btn btn-ghost btn-small" type="button">➕ 添加时段</button>
+        <button id="addCommonBtn" class="btn btn-ghost btn-small" type="button">📚 一键添加：周一–周五 上午</button>
+      </div>
+      <div class="schedule-help">
+        留空表示始终监听。每个时段独立设置：星期几 / 起始时间 / 结束时间。<br>
+        例如：<code>周五 14:00 — 15:00</code> 表示每周五下午 2 点到 3 点（自习课）才会进行分贝监听、长树/失树和 Bark 告警；<b>不在时段内时分贝仍可看，但不会改变小树或推送告警。</b><br>
+        时间按服务器本地时间，请确保服务器时区为学校所在时区。
+      </div>
+    </section>
+
+    <!-- ============ 远程摄像头 + 对讲 ============ -->
+    <section class="card">
+      <div class="card-title">📹 远程摄像头与对讲（按需点对点连接）</div>
+      <div class="webrtc-controls">
+        <button id="callBtn" class="btn btn-primary btn-small" type="button">▶ 开始连接</button>
+        <button id="hangupBtn" class="btn btn-secondary btn-small" type="button" disabled>⏹ 挂断</button>
+        <button id="muteBtn" class="btn btn-ghost btn-small" type="button" disabled>🔇 静音我</button>
+        <span class="webrtc-status" id="webrtcStatus">未连接</span>
+      </div>
+      <div class="webrtc-stage" id="webrtcStage">
+        <video id="remoteVideo" class="webrtc-video" autoplay playsinline muted></video>
+        <div class="webrtc-overlay" id="webrtcOverlay">点击「开始连接」请求查看学生端摄像头与课堂声音</div>
+      </div>
+      <audio id="remoteAudio" autoplay playsinline></audio>
+      <div class="webrtc-help">
+        说明：点击「开始连接」后会请求老师设备的麦克风权限，并要求<b>学生端浏览器接受摄像头与麦克风权限</b>。<br>
+        视频/音频通过 <b>WebRTC 点对点</b>传输，不上传服务器，仅在本卡片激活时占用流量；点击「挂断」立即释放。<br>
+        若两端处于复杂 NAT/对称 NAT，可能因缺少 TURN 服务器无法直连——这种情况局域网/同 Wi-Fi 通常没问题。
+      </div>
+    </section>
+  </main>
+
+  <footer>
+    💡 学生端打开 <code style="background:#fff;padding:2px 6px;border-radius:4px">/</code> 输入相同的 PIN 后开始检测，本页将实时同步分贝和小树状态。
+  </footer>
+
+  <script src="/static/garden.js"></script>
+  <script>
+  (function () {
+    'use strict';
+
+    // Extract PIN from /teacher/<pin>
+    const m = window.location.pathname.match(/^\/teacher\/(\d{4})\/?$/);
+    if (!m) {
+      document.body.innerHTML =
+        '<div style="padding:60px;text-align:center;font-size:18px">' +
+        '路径错误。请使用 <code>/teacher/四位数字PIN</code> 访问。</div>';
+      return;
+    }
+    const PIN = m[1];
+
+    const $ = (id) => document.getElementById(id);
+    const dbValueEl    = $('dbValue');
+    const dbBarEl      = $('dbBar');
+    const quietMarker  = $('quietMarker');
+    const loudMarker   = $('loudMarker');
+    const statusText   = $('statusText');
+    const progressFill = $('progressFill');
+    const treesEl      = $('trees');
+    const emptyHint    = $('emptyHint');
+    const pinDisplay   = $('pinDisplay');
+    const onlineDot    = $('onlineDot');
+    const onlineLabel  = $('onlineLabel');
+    const stats = {
+      small: $('statSmall'), medium: $('statMedium'),
+      large: $('statLarge'), huge: $('statHuge'),
+    };
+
+    const inputs = {
+      quietTarget:  $('quietTarget'),
+      loudTarget:   $('loudTarget'),
+      barkUrl:      $('barkUrl'),
+      alertDb:      $('alertDb'),
+      alertSeconds: $('alertSeconds'),
+    };
+
+    const schedulePill   = $('schedulePill');
+    const scheduleListEl = $('scheduleList');
+    const scheduleSummary= $('scheduleSummary');
+    const serverNowDisp  = $('serverNowDisplay');
+    const addScheduleBtn = $('addScheduleBtn');
+    const addCommonBtn   = $('addCommonBtn');
+
+    const callBtn      = $('callBtn');
+    const hangupBtn    = $('hangupBtn');
+    const muteBtn      = $('muteBtn');
+    const webrtcStatus = $('webrtcStatus');
+    const webrtcOverlay= $('webrtcOverlay');
+    const remoteVideo  = $('remoteVideo');
+    const remoteAudio  = $('remoteAudio');
+
+    const DAY_NAMES = ['周一','周二','周三','周四','周五','周六','周日'];
+
+    pinDisplay.textContent = PIN;
+
+    // ------------- SSE -------------
+    let evtSource = null;
+    let lastState = null;
+    let dirtyKeys = new Set();          // user is editing these — don't overwrite
+
+    function connectStream() {
+      if (evtSource) evtSource.close();
+      evtSource = new EventSource('/api/stream/' + PIN);
+      evtSource.onmessage = (e) => {
+        try { applyServerState(JSON.parse(e.data)); } catch (err) {}
+      };
+      evtSource.addEventListener('signal', (e) => {
+        let msg;
+        try { msg = JSON.parse(e.data); } catch (_) { return; }
+        handleSignal(msg);
+      });
+      evtSource.onerror = () => {
+        onlineDot.classList.remove('live');
+        onlineLabel.textContent = '连接断开，正在重连…';
+      };
+    }
+
+    async function handleSignal(msg) {
+      if (!msg || msg.from === 'teacher') return; // ignore our own
+      if (msg.type === 'answer') {
+        if (!pc || !msg.data) return;
+        try { await pc.setRemoteDescription(msg.data); }
+        catch (e) { setWebrtcStatus('应用 answer 失败：' + e.message, 'err'); }
+      } else if (msg.type === 'ice') {
+        if (!pc || !msg.data) return;
+        try { await pc.addIceCandidate(msg.data); } catch (_) {}
+      } else if (msg.type === 'hangup') {
+        setWebrtcStatus('对方挂断');
+        cleanupCall();
+      }
+    }
+
+    function applyServerState(st) {
+      lastState = st;
+
+      // Online indicator
+      if (st.online) {
+        onlineDot.classList.add('live');
+        onlineLabel.textContent = '学生端在线';
+      } else {
+        onlineDot.classList.remove('live');
+        onlineLabel.textContent = '学生端离线';
+      }
+
+      // Server time + schedule status
+      if (serverNowDisp) {
+        const wd = (st.serverWeekday != null) ? DAY_NAMES[st.serverWeekday] : '';
+        serverNowDisp.textContent = (wd ? wd + ' ' : '') + (st.serverTimeStr || '');
+      }
+      const sched = (st.settings && st.settings.schedule) || [];
+      if (schedulePill) {
+        if (sched.length === 0) {
+          schedulePill.hidden = true;
+        } else {
+          schedulePill.hidden = false;
+          if (st.inSchedule) {
+            schedulePill.className = 'schedule-pill on';
+            schedulePill.textContent = '⏵ 监听时段中';
+          } else {
+            schedulePill.className = 'schedule-pill off';
+            schedulePill.textContent = '⏸ 不在监听时段';
+          }
+        }
+      }
+      if (scheduleSummary) {
+        scheduleSummary.textContent = sched.length === 0
+          ? '尚未设置任何时段，将始终监听。'
+          : (sched.length + ' 个时段已设置 · ' +
+             (st.inSchedule ? '当前正在监听 🟢' : '当前不在监听时段 ⏸'));
+      }
+      // Re-render schedule list only when not actively editing
+      if (!dirtyKeys.has('schedule')) {
+        renderScheduleList(sched);
+      }
+
+      // dB display
+      if (st.online) {
+        dbValueEl.textContent = st.currentDb;
+        dbValueEl.classList.toggle('quiet', st.currentDb <= st.settings.quietTarget);
+        dbValueEl.classList.toggle('loud',  st.currentDb >= st.settings.loudTarget);
+        dbValueEl.classList.remove('offline');
+      } else {
+        dbValueEl.textContent = '--';
+        dbValueEl.classList.remove('quiet', 'loud');
+        dbValueEl.classList.add('offline');
+      }
+      dbBarEl.style.width = (st.online ? (st.currentDb / QG.MAX_DB_DISPLAY) * 100 : 0).toFixed(1) + '%';
+
+      QG.updateMarkers({ quiet: quietMarker, loud: loudMarker }, st.settings);
+
+      // Settings inputs (don't overwrite while user types)
+      ['quietTarget', 'loudTarget', 'alertDb', 'alertSeconds', 'barkUrl'].forEach(k => {
+        if (!dirtyKeys.has(k) && document.activeElement !== inputs[k]) {
+          inputs[k].value = st.settings[k];
+        }
+      });
+
+      // Trees
+      QG.renderTrees(treesEl, st.trees || []);
+      QG.updateStats(stats, st.trees || []);
+      emptyHint.style.display = (st.trees && st.trees.length) ? 'none' : '';
+
+      // Progress
+      if (!st.online) {
+        statusText.innerHTML = '<span class="pill offline">学生端离线</span>等待学生端发送数据…';
+        progressFill.style.width = '0%';
+        progressFill.classList.remove('loud');
+      } else if (st.quietStreakMs > 0) {
+        const remaining = QG.fmtSecondsRemaining(st.quietStreakMs, st.growDurationMs);
+        const pct = Math.min(100, (st.quietStreakMs / st.growDurationMs) * 100);
+        progressFill.style.width = pct + '%';
+        progressFill.classList.remove('loud');
+        statusText.innerHTML = '<span class="pill quiet">安静中</span>再坚持 <strong>' + remaining + '</strong> 秒长出一棵小松树 🌱';
+      } else if (st.loudStreakMs > 0) {
+        const remaining = QG.fmtSecondsRemaining(st.loudStreakMs, st.shrinkDurationMs);
+        const pct = Math.min(100, (st.loudStreakMs / st.shrinkDurationMs) * 100);
+        progressFill.style.width = pct + '%';
+        progressFill.classList.add('loud');
+        statusText.innerHTML = '<span class="pill loud">太吵啦</span>再吵 <strong>' + remaining + '</strong> 秒会失去一棵松树 😢';
+      } else {
+        progressFill.style.width = '0%';
+        progressFill.classList.remove('loud');
+        statusText.innerHTML = '<span class="pill idle">监测中</span>声音处于安静线和吵闹线之间。';
+      }
+
+      // Bark status line
+      const bs = $('barkStatus');
+      if (st.lastBarkStatus) {
+        const when = st.lastBarkSentAt
+          ? new Date(st.lastBarkSentAt * 1000).toLocaleTimeString('zh-CN', { hour12: false })
+          : '';
+        const cls = st.lastBarkStatus.startsWith('OK') ? 'ok'
+                  : st.lastBarkStatus.startsWith('ERR') ? 'err' : '';
+        bs.className = 'bark-status ' + cls;
+        bs.textContent = '上次推送：' + (when ? when + '  ' : '') + st.lastBarkStatus;
+      }
+    }
+
+    // ------------- Settings save (debounced) -------------
+    let saveTimer = null;
+    function scheduleSave() {
+      if (saveTimer) clearTimeout(saveTimer);
+      saveTimer = setTimeout(saveSettings, 400);
+    }
+    async function saveSettings(extra) {
+      const payload = {
+        quietTarget:  QG.clampInt(inputs.quietTarget.value, 0, 120, 40),
+        loudTarget:   QG.clampInt(inputs.loudTarget.value, 0, 120, 80),
+        alertDb:      QG.clampInt(inputs.alertDb.value, 0, 120, 80),
+        alertSeconds: QG.clampInt(inputs.alertSeconds.value, 5, 3600, 60),
+        barkUrl:      inputs.barkUrl.value.trim(),
+      };
+      // schedule comes from current edited state if dirty, else server's last view.
+      payload.schedule = collectScheduleFromUI();
+      if (extra) Object.assign(payload, extra);
+      try {
+        await fetch('/api/settings/' + PIN, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(payload),
+        });
+      } catch (e) {
+        $('barkStatus').className = 'bark-status err';
+        $('barkStatus').textContent = '保存失败：' + e;
+      }
+      // After server confirms, the next SSE message will refresh inputs.
+      dirtyKeys.clear();
+    }
+
+    // ====================== Schedule editor ======================
+
+    function buildScheduleRow(slot, idx) {
+      const row = document.createElement('div');
+      row.className = 'schedule-row';
+      row.dataset.idx = String(idx);
+
+      const sel = document.createElement('select');
+      sel.className = 'sched-day';
+      DAY_NAMES.forEach((name, i) => {
+        const opt = document.createElement('option');
+        opt.value = String(i);
+        opt.textContent = name;
+        if (i === Number(slot.day)) opt.selected = true;
+        sel.appendChild(opt);
+      });
+
+      const start = document.createElement('input');
+      start.type = 'time'; start.className = 'sched-start';
+      start.value = slot.start || '08:00';
+
+      const dash  = document.createElement('span');
+      dash.className = 'sched-dash'; dash.textContent = '—';
+
+      const end   = document.createElement('input');
+      end.type = 'time'; end.className = 'sched-end';
+      end.value = slot.end || '09:00';
+
+      const del   = document.createElement('button');
+      del.type = 'button'; del.className = 'schedule-del';
+      del.title = '删除此时段'; del.textContent = '✕';
+
+      row.appendChild(sel);
+      row.appendChild(start);
+      row.appendChild(dash);
+      row.appendChild(end);
+      row.appendChild(del);
+
+      const onChange = () => { dirtyKeys.add('schedule'); scheduleSave(); };
+      sel.addEventListener('change', onChange);
+      start.addEventListener('change', onChange);
+      end.addEventListener('change', onChange);
+      del.addEventListener('click', () => {
+        row.remove();
+        dirtyKeys.add('schedule');
+        scheduleSave();
+      });
+      return row;
+    }
+
+    function renderScheduleList(list) {
+      scheduleListEl.innerHTML = '';
+      if (!list || list.length === 0) {
+        const empty = document.createElement('div');
+        empty.className = 'schedule-empty';
+        empty.textContent = '⏱ 尚未设置任何时段，将始终监听本班声音。点击下方「添加时段」可开始排课。';
+        scheduleListEl.appendChild(empty);
+        return;
+      }
+      list.forEach((slot, i) => {
+        scheduleListEl.appendChild(buildScheduleRow(slot, i));
+      });
+    }
+
+    function collectScheduleFromUI() {
+      // Read the schedule from whatever's currently rendered (preserves
+      // user's in-flight edits even if SSE state hasn't echoed yet).
+      const rows = [...scheduleListEl.querySelectorAll('.schedule-row')];
+      return rows.map(r => ({
+        day: parseInt(r.querySelector('.sched-day').value, 10),
+        start: r.querySelector('.sched-start').value || '00:00',
+        end:   r.querySelector('.sched-end').value   || '00:00',
+      }));
+    }
+
+    let scheduleSaveTimer = null;
+    function scheduleSave() {
+      if (scheduleSaveTimer) clearTimeout(scheduleSaveTimer);
+      scheduleSaveTimer = setTimeout(saveSettings, 400);
+    }
+
+    addScheduleBtn.addEventListener('click', () => {
+      // append a default slot — server will sanitize on save
+      const defaults = [{ day: 4, start: '14:00', end: '15:00' }];
+      const cur = collectScheduleFromUI();
+      cur.push(defaults[0]);
+      renderScheduleList(cur);
+      dirtyKeys.add('schedule');
+      scheduleSave();
+    });
+
+    addCommonBtn.addEventListener('click', () => {
+      const cur = collectScheduleFromUI();
+      // Mon-Fri 08:00-12:00 (school morning) — duplicates skipped by sanitizer
+      // are still fine, just re-saved.
+      [0,1,2,3,4].forEach(d => cur.push({ day: d, start: '08:00', end: '12:00' }));
+      renderScheduleList(cur);
+      dirtyKeys.add('schedule');
+      scheduleSave();
+    });
+
+    // ====================== WebRTC: teacher initiates ======================
+
+    const ICE_SERVERS = [
+      { urls: 'stun:stun.l.google.com:19302' },
+      { urls: 'stun:stun1.l.google.com:19302' },
+      { urls: 'stun:stun.cloudflare.com:3478' },
+    ];
+
+    let pc = null;
+    let localStream = null;
+
+    function setWebrtcStatus(text, kind) {
+      webrtcStatus.textContent = text;
+      webrtcStatus.className = 'webrtc-status' + (kind ? ' ' + kind : '');
+    }
+
+    async function startCall() {
+      if (pc) return;
+      if (!lastState || !lastState.online) {
+        setWebrtcStatus('学生端离线，无法连接', 'err');
+        return;
+      }
+      setWebrtcStatus('请求麦克风权限…');
+      try {
+        localStream = await navigator.mediaDevices.getUserMedia({
+          audio: { echoCancellation: true, noiseSuppression: true, autoGainControl: true },
+          video: false,
+        });
+      } catch (err) {
+        setWebrtcStatus('无法获取本机麦克风：' + (err.message || err), 'err');
+        return;
+      }
+      pc = new RTCPeerConnection({ iceServers: ICE_SERVERS });
+      localStream.getTracks().forEach(t => pc.addTrack(t, localStream));
+      // We'll also be a receiver of student video + audio
+      try { pc.addTransceiver('video', { direction: 'recvonly' }); } catch (_) {}
+
+      pc.ontrack = (e) => {
+        if (e.track.kind === 'video') {
+          remoteVideo.srcObject = e.streams[0];
+          webrtcOverlay.style.display = 'none';
+        } else {
+          remoteAudio.srcObject = e.streams[0];
+        }
+      };
+      pc.onicecandidate = (e) => {
+        if (e.candidate) sendSignal('ice', e.candidate.toJSON());
+      };
+      pc.onconnectionstatechange = () => {
+        if (!pc) return;
+        const s = pc.connectionState;
+        if (s === 'connected') {
+          setWebrtcStatus('✅ 已连接', 'ok');
+          hangupBtn.disabled = false;
+          muteBtn.disabled = false;
+        } else if (s === 'connecting') {
+          setWebrtcStatus('正在协商连接…');
+        } else if (s === 'failed') {
+          setWebrtcStatus('连接失败（可能受 NAT 限制）', 'err');
+          cleanupCall();
+        } else if (s === 'disconnected' || s === 'closed') {
+          setWebrtcStatus('已断开');
+          cleanupCall();
+        }
+      };
+
+      try {
+        const offer = await pc.createOffer({ offerToReceiveAudio: true, offerToReceiveVideo: true });
+        await pc.setLocalDescription(offer);
+        sendSignal('offer', { sdp: pc.localDescription.sdp, type: pc.localDescription.type });
+        setWebrtcStatus('已发出连接请求，等待学生端接受…');
+        callBtn.disabled = true;
+      } catch (e) {
+        setWebrtcStatus('创建 offer 失败：' + e.message, 'err');
+        cleanupCall();
+      }
+    }
+
+    function cleanupCall() {
+      if (pc) { try { pc.close(); } catch (_) {} pc = null; }
+      if (localStream) { localStream.getTracks().forEach(t => t.stop()); localStream = null; }
+      remoteVideo.srcObject = null;
+      remoteAudio.srcObject = null;
+      webrtcOverlay.style.display = '';
+      callBtn.disabled = false;
+      hangupBtn.disabled = true;
+      muteBtn.disabled = true;
+      muteBtn.textContent = '🔇 静音我';
+    }
+
+    function sendSignal(type, data) {
+      fetch('/api/signal/' + PIN, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ from: 'teacher', type, data }),
+      }).catch(() => {});
+    }
+
+    callBtn.addEventListener('click', startCall);
+    hangupBtn.addEventListener('click', () => {
+      sendSignal('hangup', null);
+      setWebrtcStatus('已挂断');
+      cleanupCall();
+    });
+    muteBtn.addEventListener('click', () => {
+      if (!localStream) return;
+      const tracks = localStream.getAudioTracks();
+      if (!tracks.length) return;
+      const enabled = !tracks[0].enabled;
+      tracks.forEach(t => t.enabled = enabled);
+      muteBtn.textContent = enabled ? '🔇 静音我' : '🎙 取消静音';
+    });
+
+    Object.keys(inputs).forEach(k => {
+      const el = inputs[k];
+      el.addEventListener('input', () => { dirtyKeys.add(k); scheduleSave(); });
+      el.addEventListener('change', () => { dirtyKeys.add(k); scheduleSave(); });
+    });
+    document.querySelectorAll('button.step').forEach(btn => {
+      btn.addEventListener('click', () => {
+        const key = btn.dataset.target;
+        const delta = parseInt(btn.dataset.delta, 10);
+        const min = parseInt(inputs[key].min || '0', 10);
+        const max = parseInt(inputs[key].max || '120', 10);
+        const cur = parseInt(inputs[key].value || '0', 10);
+        inputs[key].value = Math.max(min, Math.min(max, cur + delta));
+        dirtyKeys.add(key);
+        scheduleSave();
+      });
+    });
+
+    $('testBarkBtn').addEventListener('click', async () => {
+      const url = inputs.barkUrl.value.trim();
+      if (!url) {
+        $('barkStatus').className = 'bark-status err';
+        $('barkStatus').textContent = '请先填写 Bark 链接再测试。';
+        return;
+      }
+      // Make sure server has the latest URL before testing
+      await saveSettings();
+      $('barkStatus').className = 'bark-status';
+      $('barkStatus').textContent = '正在发送测试通知…';
+      try {
+        const r = await fetch('/api/test-bark/' + PIN, { method: 'POST',
+          headers: { 'Content-Type': 'application/json' }, body: '{}' });
+        if (!r.ok) {
+          const t = await r.text();
+          $('barkStatus').className = 'bark-status err';
+          $('barkStatus').textContent = '发送失败：' + t;
+        } else {
+          $('barkStatus').className = 'bark-status ok';
+          $('barkStatus').textContent = '已发送，请查看手机通知。';
+        }
+      } catch (e) {
+        $('barkStatus').className = 'bark-status err';
+        $('barkStatus').textContent = '发送失败：' + e;
+      }
+    });
+
+    $('resetGardenBtn').addEventListener('click', async () => {
+      if (!confirm('确定重置花园吗？所有小树将清空。')) return;
+      try {
+        await fetch('/api/reset', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ pin: PIN }),
+        });
+      } catch (e) {}
+    });
+
+    connectStream();
+    window.addEventListener('beforeunload', () => { if (evtSource) evtSource.close(); });
+  })();
+  </script>
+</body>
+</html>

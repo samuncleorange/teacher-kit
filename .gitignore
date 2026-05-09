@@ -1,0 +1,22 @@
+# Persisted class settings (different per deployment)
+settings.json
+
+# Process logs
+nohup.out
+*.log
+
+# Python bytecode
+__pycache__/
+*.py[cod]
+*$py.class
+
+# Editor / OS
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
+
+# Backups
+*~
+*.swp
+*.bak

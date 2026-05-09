@@ -1,0 +1,535 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>安静花园养小树</title>
+<link rel="stylesheet" href="/static/style.css">
+</head>
+<body>
+  <!-- ============ PIN modal (first visit only) ============ -->
+  <div class="pin-overlay" id="pinOverlay" hidden>
+    <div class="pin-modal">
+      <h2>🔢 输入班级 PIN 码</h2>
+      <p>
+        欢迎来到安静花园！请输入老师告诉你的 4 位 PIN 码，<br>
+        让本班的小树在这里悄悄长大。<br>
+        老师可以打开 <code>/teacher/PIN</code> 远程查看本班实时分贝。
+      </p>
+      <div class="pin-inputs" id="pinInputs">
+        <input maxlength="1" inputmode="numeric" pattern="[0-9]" autocomplete="off">
+        <input maxlength="1" inputmode="numeric" pattern="[0-9]" autocomplete="off">
+        <input maxlength="1" inputmode="numeric" pattern="[0-9]" autocomplete="off">
+        <input maxlength="1" inputmode="numeric" pattern="[0-9]" autocomplete="off">
+      </div>
+      <div class="pin-error" id="pinError"></div>
+      <button id="pinConfirm" class="btn btn-primary">进入花园</button>
+    </div>
+  </div>
+
+  <header>
+    <h1><span class="emoji">🌲</span> 安静花园养小树 <span class="emoji">🌲</span></h1>
+    <p class="slogan">小声说话，让小树悄悄长大 · 让我们的花园越来越美 🌱</p>
+    <div>
+      <span class="pin-badge">
+        <span class="role-tag student">学生端</span>
+        班级 PIN: <strong id="pinDisplay">----</strong>
+        <button id="changePinBtn" type="button">切换</button>
+      </span>
+    </div>
+  </header>
+
+  <main>
+    <!-- Schedule banner: shown when teacher's schedule is set & we're outside it -->
+    <div class="schedule-banner" id="scheduleBanner" hidden>
+      <span class="banner-icon">⏸</span>
+      <span class="banner-text">当前不在监听时段，老师未启用本时段。小树状态保持不变，可放心活动。</span>
+    </div>
+
+    <!-- Remote-call indicator: shown when teacher initiates camera/intercom -->
+    <div class="remote-call-banner" id="remoteCallBanner" hidden>
+      <span class="banner-icon">📹</span>
+      <span class="banner-text" id="remoteCallText">老师正在请求查看课堂…</span>
+      <button id="hangupRemoteBtn" class="link-btn" type="button">断开</button>
+    </div>
+
+    <!-- Status -->
+    <section class="card status-card">
+      <div class="db-display">
+        <span class="db-label">当前分贝</span>
+        <span class="db-value" id="dbValue">--</span>
+        <span class="db-unit">dB</span>
+      </div>
+      <div class="meter-wrapper">
+        <div class="db-meter">
+          <div class="db-bar" id="dbBar"></div>
+          <div class="db-marker quiet-marker" id="quietMarker">
+            <span class="marker-label">安静线</span>
+          </div>
+          <div class="db-marker loud-marker" id="loudMarker">
+            <span class="marker-label">吵闹线</span>
+          </div>
+        </div>
+        <div class="progress-info">
+          <span class="status-text" id="statusText">
+            <span class="pill idle">未开始</span>点击「开始检测」按钮启动麦克风
+          </span>
+          <div class="progress-bar">
+            <div class="progress-fill" id="progressFill"></div>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <!-- Garden -->
+    <section class="card" style="padding: 0; overflow: hidden;">
+      <div class="garden" id="garden">
+        <div class="sun"></div>
+        <div class="hill-back"></div>
+        <div class="hill-front"></div>
+        <div class="grass"></div>
+        <div class="trees" id="trees"></div>
+        <div class="empty-hint" id="emptyHint">花园还是空的，让我们一起保持安静吧 🌱</div>
+      </div>
+    </section>
+
+    <div class="stats">
+      <span class="stat">小松树：<strong id="statSmall">0</strong></span>
+      <span class="stat">中松树：<strong id="statMedium">0</strong></span>
+      <span class="stat">大松树：<strong id="statLarge">0</strong></span>
+      <span class="stat">参天松：<strong id="statHuge">0</strong></span>
+    </div>
+
+    <!-- Controls -->
+    <section class="card controls">
+      <div class="setting">
+        <label>🤫 安静目标</label>
+        <span class="unit" id="quietTargetDisplay">40 dB</span>
+        <span class="unit" style="margin-left:auto;font-size:12px;opacity:0.6">由老师设置</span>
+      </div>
+      <div class="setting">
+        <label>📢 吵闹阈值</label>
+        <span class="unit" id="loudTargetDisplay">80 dB</span>
+        <span class="unit" style="margin-left:auto;font-size:12px;opacity:0.6">由老师设置</span>
+      </div>
+      <div class="buttons">
+        <button id="startBtn" class="btn btn-primary">🎤 开始检测</button>
+        <button id="stopBtn" class="btn btn-secondary" disabled>⏹ 结束检测</button>
+      </div>
+    </section>
+  </main>
+
+  <footer>
+    💡 小贴士：当声音持续低于「安静目标」60 秒，就会长出一棵小松树；3 棵小松树会合并成一棵更大的松树！
+  </footer>
+
+  <script src="/static/garden.js"></script>
+  <script>
+  (function () {
+    'use strict';
+
+    const STORAGE_KEY = 'quiet-tree-pin';
+    const SAMPLE_INTERVAL_MS = 200;
+    const DB_OFFSET = 90;
+
+    const $ = (id) => document.getElementById(id);
+    const dbValueEl    = $('dbValue');
+    const dbBarEl      = $('dbBar');
+    const quietMarker  = $('quietMarker');
+    const loudMarker   = $('loudMarker');
+    const statusText   = $('statusText');
+    const progressFill = $('progressFill');
+    const treesEl      = $('trees');
+    const emptyHint    = $('emptyHint');
+    const startBtn     = $('startBtn');
+    const stopBtn      = $('stopBtn');
+    const quietDisp    = $('quietTargetDisplay');
+    const loudDisp     = $('loudTargetDisplay');
+    const pinDisplay   = $('pinDisplay');
+    const changePinBtn = $('changePinBtn');
+    const stats = {
+      small: $('statSmall'), medium: $('statMedium'),
+      large: $('statLarge'), huge: $('statHuge'),
+    };
+    const scheduleBanner   = $('scheduleBanner');
+    const remoteCallBanner = $('remoteCallBanner');
+    const remoteCallText   = $('remoteCallText');
+    const hangupRemoteBtn  = $('hangupRemoteBtn');
+
+    // ------------- PIN modal -------------
+    const pinOverlay = $('pinOverlay');
+    const pinError   = $('pinError');
+    const pinInputs  = [...$('pinInputs').querySelectorAll('input')];
+    const pinConfirm = $('pinConfirm');
+
+    function loadPin() {
+      const v = localStorage.getItem(STORAGE_KEY);
+      return /^\d{4}$/.test(v || '') ? v : null;
+    }
+    function savePin(pin) { localStorage.setItem(STORAGE_KEY, pin); }
+    function showPinModal() {
+      pinOverlay.hidden = false;
+      pinInputs.forEach(i => i.value = '');
+      pinError.textContent = '';
+      setTimeout(() => pinInputs[0].focus(), 100);
+    }
+    function hidePinModal() { pinOverlay.hidden = true; }
+
+    pinInputs.forEach((inp, idx) => {
+      inp.addEventListener('input', (e) => {
+        const v = e.target.value.replace(/\D/g, '');
+        e.target.value = v.slice(-1);
+        if (e.target.value && idx < pinInputs.length - 1) {
+          pinInputs[idx + 1].focus();
+        }
+        if (pinInputs.every(i => /^\d$/.test(i.value))) {
+          // auto-submit feel; user still confirms
+        }
+      });
+      inp.addEventListener('keydown', (e) => {
+        if (e.key === 'Backspace' && !inp.value && idx > 0) {
+          pinInputs[idx - 1].focus();
+          pinInputs[idx - 1].value = '';
+          e.preventDefault();
+        }
+        if (e.key === 'Enter') confirmPin();
+      });
+      inp.addEventListener('paste', (e) => {
+        e.preventDefault();
+        const text = (e.clipboardData || window.clipboardData).getData('text');
+        const digits = text.replace(/\D/g, '').slice(0, 4);
+        digits.split('').forEach((d, i) => {
+          if (pinInputs[i]) pinInputs[i].value = d;
+        });
+        if (digits.length === 4) pinInputs[3].focus();
+      });
+    });
+    pinConfirm.addEventListener('click', confirmPin);
+
+    function confirmPin() {
+      const pin = pinInputs.map(i => i.value).join('');
+      if (!/^\d{4}$/.test(pin)) {
+        pinError.textContent = '请输入完整的 4 位数字 PIN 码';
+        return;
+      }
+      savePin(pin);
+      pinDisplay.textContent = pin;
+      hidePinModal();
+      onPinReady(pin);
+    }
+
+    changePinBtn.addEventListener('click', () => {
+      stopDetection();
+      localStorage.removeItem(STORAGE_KEY);
+      pinDisplay.textContent = '----';
+      showPinModal();
+    });
+
+    // ------------- Audio capture -------------
+    let audioCtx = null, mediaStream = null, analyser = null, sourceNode = null;
+    let animationFrameId = null, isRunning = false, smoothedDb = 0, currentDb = 0;
+    let sampleTimer = null;
+    let serverState = null;
+    let pollTimer = null;
+    let activePin = null;
+
+    async function startDetection() {
+      if (isRunning) return;
+      try {
+        mediaStream = await navigator.mediaDevices.getUserMedia({
+          audio: { echoCancellation: false, noiseSuppression: false, autoGainControl: false }
+        });
+      } catch (err) {
+        let msg = '无法打开麦克风：' + (err.message || err);
+        if (err.name === 'NotAllowedError') {
+          msg = '麦克风权限被拒绝，请在浏览器允许麦克风后重试。';
+        } else if (location.protocol !== 'https:'
+            && location.hostname !== 'localhost'
+            && location.hostname !== '127.0.0.1') {
+          msg += '（当前地址 ' + location.host
+              + ' 非 https/localhost，浏览器会拒绝麦克风）';
+        }
+        renderStatus('idle', '⚠️ ' + msg);
+        return;
+      }
+      audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+      sourceNode = audioCtx.createMediaStreamSource(mediaStream);
+      analyser = audioCtx.createAnalyser();
+      analyser.fftSize = 2048;
+      analyser.smoothingTimeConstant = 0.4;
+      sourceNode.connect(analyser);
+
+      isRunning = true;
+      startBtn.disabled = true;
+      stopBtn.disabled = false;
+      audioLoop();
+      sampleTimer = setInterval(postSample, SAMPLE_INTERVAL_MS);
+    }
+
+    function stopDetection() {
+      isRunning = false;
+      if (animationFrameId) { cancelAnimationFrame(animationFrameId); animationFrameId = null; }
+      if (sampleTimer) { clearInterval(sampleTimer); sampleTimer = null; }
+      if (mediaStream) { mediaStream.getTracks().forEach(t => t.stop()); mediaStream = null; }
+      if (audioCtx) { audioCtx.close().catch(() => {}); audioCtx = null; }
+      sourceNode = null; analyser = null;
+      startBtn.disabled = false;
+      stopBtn.disabled = true;
+      dbValueEl.textContent = '--';
+      dbValueEl.classList.remove('quiet', 'loud');
+      dbBarEl.style.width = '0%';
+      progressFill.style.width = '0%';
+      progressFill.classList.remove('loud');
+      currentDb = 0; smoothedDb = 0;
+    }
+
+    function audioLoop() {
+      if (!isRunning || !analyser) return;
+      const buf = new Float32Array(analyser.fftSize);
+      analyser.getFloatTimeDomainData(buf);
+      let sumSq = 0;
+      for (let i = 0; i < buf.length; i++) sumSq += buf[i] * buf[i];
+      const rms = Math.sqrt(sumSq / buf.length);
+      let db = (rms < 1e-7) ? 0 : (20 * Math.log10(rms) + DB_OFFSET);
+      if (db < 0) db = 0;
+      if (db > QG.MAX_DB_DISPLAY) db = QG.MAX_DB_DISPLAY;
+      smoothedDb = smoothedDb * 0.7 + db * 0.3;
+      currentDb = Math.round(smoothedDb);
+
+      dbValueEl.textContent = currentDb;
+      dbBarEl.style.width = ((smoothedDb / QG.MAX_DB_DISPLAY) * 100).toFixed(1) + '%';
+
+      if (serverState && serverState.settings) {
+        const q = serverState.settings.quietTarget;
+        const l = serverState.settings.loudTarget;
+        dbValueEl.classList.toggle('quiet', currentDb <= q);
+        dbValueEl.classList.toggle('loud', currentDb >= l);
+      }
+
+      animationFrameId = requestAnimationFrame(audioLoop);
+    }
+
+    async function postSample() {
+      if (!activePin) return;
+      try {
+        await fetch('/api/sample', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ pin: activePin, db: currentDb }),
+          keepalive: true,
+        });
+      } catch (e) { /* ignore */ }
+    }
+
+    // ------------- Server state polling (SSE) -------------
+    let evtSource = null;
+    function connectStream(pin) {
+      if (evtSource) { evtSource.close(); evtSource = null; }
+      evtSource = new EventSource('/api/stream/' + pin);
+      evtSource.onmessage = (e) => {
+        try { applyServerState(JSON.parse(e.data)); } catch (err) {}
+      };
+      evtSource.addEventListener('signal', (e) => {
+        let msg;
+        try { msg = JSON.parse(e.data); } catch (_) { return; }
+        handleSignal(msg);
+      });
+      evtSource.onerror = () => { /* will auto-reconnect */ };
+    }
+
+    // ====================== WebRTC answer (student side) ======================
+
+    const ICE_SERVERS = [
+      { urls: 'stun:stun.l.google.com:19302' },
+      { urls: 'stun:stun1.l.google.com:19302' },
+      { urls: 'stun:stun.cloudflare.com:3478' },
+    ];
+
+    let pc = null;            // RTCPeerConnection
+    let callStream = null;    // separate getUserMedia stream for the call (camera+mic, EC on)
+    let pendingIce = [];      // ICE candidates that arrived before we set remote desc
+
+    async function handleSignal(msg) {
+      if (!msg || msg.from === 'student') return; // ignore our own
+      if (msg.type === 'offer') {
+        await acceptCall(msg.data);
+      } else if (msg.type === 'ice') {
+        if (pc && msg.data) {
+          if (pc.remoteDescription) {
+            try { await pc.addIceCandidate(msg.data); } catch (_) {}
+          } else {
+            pendingIce.push(msg.data);
+          }
+        }
+      } else if (msg.type === 'hangup') {
+        showCallBanner('老师已挂断。');
+        setTimeout(() => { remoteCallBanner.hidden = true; }, 1500);
+        cleanupCall();
+      }
+    }
+
+    function showCallBanner(text) {
+      remoteCallBanner.hidden = false;
+      remoteCallText.textContent = text;
+    }
+
+    async function acceptCall(offer) {
+      if (pc) { cleanupCall(); }
+      showCallBanner('📹 老师请求查看课堂，正在打开摄像头与麦克风…');
+      try {
+        callStream = await navigator.mediaDevices.getUserMedia({
+          video: { width: { ideal: 640 }, height: { ideal: 480 }, facingMode: 'user' },
+          audio: { echoCancellation: true, noiseSuppression: true, autoGainControl: true },
+        });
+      } catch (err) {
+        showCallBanner('⚠ 无法打开摄像头/麦克风：' + (err.message || err));
+        sendStudentSignal('hangup', null);
+        return;
+      }
+      pc = new RTCPeerConnection({ iceServers: ICE_SERVERS });
+      callStream.getTracks().forEach(t => pc.addTrack(t, callStream));
+
+      pc.ontrack = (e) => {
+        // teacher's voice → audio sink for intercom
+        let audioEl = document.getElementById('teacherAudio');
+        if (!audioEl) {
+          audioEl = document.createElement('audio');
+          audioEl.id = 'teacherAudio';
+          audioEl.autoplay = true;
+          audioEl.playsInline = true;
+          document.body.appendChild(audioEl);
+        }
+        audioEl.srcObject = e.streams[0];
+      };
+      pc.onicecandidate = (e) => {
+        if (e.candidate) sendStudentSignal('ice', e.candidate.toJSON());
+      };
+      pc.onconnectionstatechange = () => {
+        if (!pc) return;
+        if (pc.connectionState === 'connected') {
+          showCallBanner('🎥 老师正在远程查看 + 对讲');
+        } else if (['failed','disconnected','closed'].includes(pc.connectionState)) {
+          cleanupCall();
+        }
+      };
+
+      try {
+        await pc.setRemoteDescription(offer);
+        // flush any ICE that arrived before remoteDescription
+        for (const c of pendingIce) { try { await pc.addIceCandidate(c); } catch (_) {} }
+        pendingIce = [];
+        const answer = await pc.createAnswer();
+        await pc.setLocalDescription(answer);
+        sendStudentSignal('answer', { sdp: pc.localDescription.sdp, type: pc.localDescription.type });
+      } catch (e) {
+        showCallBanner('协商失败：' + e.message);
+        cleanupCall();
+      }
+    }
+
+    function cleanupCall() {
+      if (pc) { try { pc.close(); } catch (_) {} pc = null; }
+      if (callStream) { callStream.getTracks().forEach(t => t.stop()); callStream = null; }
+      const audioEl = document.getElementById('teacherAudio');
+      if (audioEl) audioEl.srcObject = null;
+      pendingIce = [];
+    }
+
+    function sendStudentSignal(type, data) {
+      if (!activePin) return;
+      fetch('/api/signal/' + activePin, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ from: 'student', type, data }),
+      }).catch(() => {});
+    }
+
+    hangupRemoteBtn.addEventListener('click', () => {
+      sendStudentSignal('hangup', null);
+      remoteCallBanner.hidden = true;
+      cleanupCall();
+    });
+
+    function applyServerState(st) {
+      serverState = st;
+      // Settings display
+      quietDisp.textContent = st.settings.quietTarget + ' dB';
+      loudDisp.textContent  = st.settings.loudTarget + ' dB';
+      QG.updateMarkers({ quiet: quietMarker, loud: loudMarker }, st.settings);
+
+      // Trees
+      QG.renderTrees(treesEl, st.trees || []);
+      QG.updateStats(stats, st.trees || []);
+      emptyHint.style.display = (st.trees && st.trees.length) ? 'none' : '';
+
+      // Schedule banner: only show if a schedule exists AND we're outside it
+      const hasSched = (st.settings && Array.isArray(st.settings.schedule) && st.settings.schedule.length > 0);
+      const outOfSched = hasSched && !st.inSchedule;
+      scheduleBanner.hidden = !outOfSched;
+
+      // Status text + progress bar (driven by server streaks)
+      if (!isRunning) {
+        renderStatus('idle', '点击「开始检测」按钮启动麦克风');
+        progressFill.style.width = '0%';
+        progressFill.classList.remove('loud');
+        return;
+      }
+      if (outOfSched) {
+        renderStatus('idle', '⏸ 当前不在监听时段，分贝仅显示，不会改变小树。');
+        progressFill.style.width = '0%';
+        progressFill.classList.remove('loud');
+        return;
+      }
+      if (st.quietStreakMs > 0) {
+        const remaining = QG.fmtSecondsRemaining(st.quietStreakMs, st.growDurationMs);
+        const pct = Math.min(100, (st.quietStreakMs / st.growDurationMs) * 100);
+        progressFill.style.width = pct + '%';
+        progressFill.classList.remove('loud');
+        renderStatus('quiet', '太棒啦！再坚持 <strong>' + remaining + '</strong> 秒就长出一棵小松树 🌱');
+      } else if (st.loudStreakMs > 0) {
+        const remaining = QG.fmtSecondsRemaining(st.loudStreakMs, st.shrinkDurationMs);
+        const pct = Math.min(100, (st.loudStreakMs / st.shrinkDurationMs) * 100);
+        progressFill.style.width = pct + '%';
+        progressFill.classList.add('loud');
+        renderStatus('loud', '太吵啦！再吵 <strong>' + remaining + '</strong> 秒就会失去一棵松树 😢');
+      } else {
+        progressFill.style.width = '0%';
+        progressFill.classList.remove('loud');
+        renderStatus('idle', '正在监测中…再小一点点就能种树啦~');
+      }
+    }
+
+    function renderStatus(kind, html) {
+      let cls = 'idle', txt = '监测中';
+      if (kind === 'quiet') { cls = 'quiet'; txt = '安静中'; }
+      else if (kind === 'loud') { cls = 'loud'; txt = '太吵啦'; }
+      else if (!isRunning) { txt = '未开始'; }
+      statusText.innerHTML = '<span class="pill ' + cls + '">' + txt + '</span>' + html;
+    }
+
+    // ------------- Wiring -------------
+    startBtn.addEventListener('click', startDetection);
+    stopBtn.addEventListener('click', stopDetection);
+
+    function onPinReady(pin) {
+      activePin = pin;
+      pinDisplay.textContent = pin;
+      connectStream(pin);
+    }
+
+    // Initial bootstrap
+    const stored = loadPin();
+    if (stored) {
+      pinDisplay.textContent = stored;
+      onPinReady(stored);
+    } else {
+      showPinModal();
+    }
+
+    window.addEventListener('beforeunload', () => {
+      if (evtSource) evtSource.close();
+    });
+  })();
+  </script>
+</body>
+</html>
