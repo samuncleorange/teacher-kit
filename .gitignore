@@ -20,3 +20,11 @@ Thumbs.db
 *~
 *.swp
 *.bak
+
+# Node dev deps (only used for tools/screenshots.js)
+node_modules/
+package.json
+package-lock.json
+
+# Demo log
+demo_server.log

@@ -7,6 +7,45 @@
 
 ---
 
+## 🖼️ 界面预览
+
+<table>
+  <tr>
+    <td align="center" width="50%">
+      <img src="docs/screenshots/student-desktop.png" alt="学生端"><br>
+      <sub><b>学生端</b> · 教室那台电脑/大屏，实时分贝 + 花园</sub>
+    </td>
+    <td align="center" width="50%">
+      <img src="docs/screenshots/teacher-desktop.png" alt="老师端"><br>
+      <sub><b>老师监控台</b> · 阈值 / Bark / 课表 / 远程对讲一站全</sub>
+    </td>
+  </tr>
+  <tr>
+    <td align="center">
+      <img src="docs/screenshots/teacher-schedule.png" alt="课表编辑器"><br>
+      <sub>📅 <b>每周监听时段</b>：按周循环排课，仅时段内统计与告警</sub>
+    </td>
+    <td align="center">
+      <img src="docs/screenshots/teacher-call-mobile.png" alt="远程对讲" height="320"><br>
+      <sub>📹 <b>远程摄像头与对讲</b>：WebRTC 点对点，按需开启</sub>
+    </td>
+  </tr>
+  <tr>
+    <td align="center">
+      <img src="docs/screenshots/student-pin.png" alt="PIN 码"><br>
+      <sub>🔢 <b>4 位 PIN 区分班级</b>，多班/多老师互不干扰</sub>
+    </td>
+    <td align="center">
+      <img src="docs/screenshots/student-mobile.png" alt="手机端" height="420"><br>
+      <sub>📱 <b>移动端响应式</b>：手机/平板自适应单列</sub>
+    </td>
+  </tr>
+</table>
+
+> _截图来自演示数据：班级 PIN `1234`，花园里 5 棵树（2 小+2 中+1 大），课表覆盖周一–周四上午 + 周五下午自习课。_
+
+---
+
 ## 🎯 项目目标
 
 让每个老师能在自己的电脑或一台小服务器上**零依赖、零运维**地跑起来。
@@ -177,16 +216,36 @@ python3 server.py
 ## 📁 项目结构
 ```
 quiet-tree/
-├── server.py             # 单文件后端（HTTP + SSE + Bark + 信令转发）
-├── settings.json         # 持久化的班级配置（自动生成，不入库）
+├── server.py                       # 单文件后端（HTTP + SSE + Bark + 信令转发）
+├── settings.json                   # 持久化的班级配置（自动生成，不入库）
 ├── static/
-│   ├── index.html        # 学生端
-│   ├── teacher.html      # 老师监控台
-│   ├── style.css         # 共享样式（含手机端响应式）
-│   └── garden.js         # 花园渲染共享逻辑（pineSvg / renderTrees / …）
-├── README.md             # 本文档
-├── .gitignore            
+│   ├── index.html                  # 学生端
+│   ├── teacher.html                # 老师监控台
+│   ├── style.css                   # 共享样式（含手机端响应式）
+│   └── garden.js                   # 花园渲染共享逻辑（pineSvg / renderTrees / …）
+├── tools/
+│   ├── screenshot_demo_server.py   # 截图用的 demo 服务（预置花园+课表）
+│   └── screenshots.js              # puppeteer-core 自动批量截图
+├── docs/
+│   └── screenshots/                # README 引用的截图
+├── README.md                       # 本文档
+├── .gitignore
 └── LICENSE
+```
+
+### 重新生成截图
+```bash
+# 1. 装系统中文字体（Debian/Ubuntu）
+sudo apt-get install -y fonts-noto-cjk fonts-noto-color-emoji
+
+# 2. 装 puppeteer-core（复用系统 chromium，不下载多余浏览器）
+npm install puppeteer-core
+
+# 3. 启动 demo 服务（端口 55557，预置 PIN 1234 的花园+课表）
+python3 tools/screenshot_demo_server.py &
+
+# 4. 抓图（写入 docs/screenshots/）
+node tools/screenshots.js
 ```
 
 ---
