@@ -153,22 +153,49 @@
 
     <!-- ============ 远程摄像头 + 对讲 ============ -->
     <section class="card">
-      <div class="card-title">📹 远程摄像头与对讲（按需点对点连接）</div>
+      <div class="card-title">📹 远程摄像头与对讲（P2P 优先 · TURN 中转兜底）</div>
       <div class="webrtc-controls">
         <button id="callBtn" class="btn btn-primary btn-small" type="button">▶ 开始连接</button>
         <button id="hangupBtn" class="btn btn-secondary btn-small" type="button" disabled>⏹ 挂断</button>
         <button id="muteBtn" class="btn btn-ghost btn-small" type="button" disabled>🔇 静音我</button>
         <span class="webrtc-status" id="webrtcStatus">未连接</span>
+        <span class="webrtc-route" id="webrtcRoute" hidden></span>
       </div>
       <div class="webrtc-stage" id="webrtcStage">
         <video id="remoteVideo" class="webrtc-video" autoplay playsinline muted></video>
         <div class="webrtc-overlay" id="webrtcOverlay">点击「开始连接」请求查看学生端摄像头与课堂声音</div>
       </div>
       <audio id="remoteAudio" autoplay playsinline></audio>
+
+      <details class="webrtc-turn">
+        <summary>⚙ 高级：TURN 中转配置（连不上时启用服务器流量兜底）</summary>
+        <div class="webrtc-turn-body">
+          <div class="setting full">
+            <label>🛰 TURN URI（多条用逗号分隔）</label>
+            <input type="text" id="turnUrl" autocomplete="off"
+                   placeholder="例如：turn:你的域名:3478?transport=udp,turn:你的域名:3478?transport=tcp">
+          </div>
+          <div class="setting">
+            <label>👤 用户名</label>
+            <input type="text" id="turnUsername" autocomplete="off" placeholder="coturn 中的 user">
+          </div>
+          <div class="setting">
+            <label>🔑 凭据</label>
+            <input type="text" id="turnCredential" autocomplete="off" placeholder="coturn 中的 password">
+          </div>
+        </div>
+        <div class="webrtc-turn-help">
+          留空表示<b>仅使用公共 STUN 做 P2P 直连</b>。若两端处于复杂 NAT / 公网封 UDP 等情况无法直连，
+          请在自有服务器上部署 <a href="https://github.com/coturn/coturn" target="_blank" rel="noopener">coturn</a>，
+          或者用第三方 TURN，把信息填入这里——优先 P2P，连不上时自动走中转。具体安装见仓库
+          <code>docs/coturn-setup.md</code>。
+        </div>
+      </details>
+
       <div class="webrtc-help">
-        说明：点击「开始连接」后会请求老师设备的麦克风权限，并要求<b>学生端浏览器接受摄像头与麦克风权限</b>。<br>
-        视频/音频通过 <b>WebRTC 点对点</b>传输，不上传服务器，仅在本卡片激活时占用流量；点击「挂断」立即释放。<br>
-        若两端处于复杂 NAT/对称 NAT，可能因缺少 TURN 服务器无法直连——这种情况局域网/同 Wi-Fi 通常没问题。
+        点击「开始连接」会临时启用老师设备的麦克风、并请求学生端打开摄像头/麦克风。<br>
+        通话音视频走 <b>WebRTC 端到端加密</b>；ICE 优先尝试 P2P 直连，失败时才使用配置的 TURN 服务器中转。<br>
+        点击「挂断」立即释放摄像头与上行流量。
       </div>
     </section>
   </main>
@@ -210,11 +237,14 @@
     };
 
     const inputs = {
-      quietTarget:  $('quietTarget'),
-      loudTarget:   $('loudTarget'),
-      barkUrl:      $('barkUrl'),
-      alertDb:      $('alertDb'),
-      alertSeconds: $('alertSeconds'),
+      quietTarget:    $('quietTarget'),
+      loudTarget:     $('loudTarget'),
+      barkUrl:        $('barkUrl'),
+      alertDb:        $('alertDb'),
+      alertSeconds:   $('alertSeconds'),
+      turnUrl:        $('turnUrl'),
+      turnUsername:   $('turnUsername'),
+      turnCredential: $('turnCredential'),
     };
 
     const schedulePill   = $('schedulePill');
@@ -332,8 +362,10 @@
       QG.updateMarkers({ quiet: quietMarker, loud: loudMarker }, st.settings);
 
       // Settings inputs (don't overwrite while user types)
-      ['quietTarget', 'loudTarget', 'alertDb', 'alertSeconds', 'barkUrl'].forEach(k => {
-        if (!dirtyKeys.has(k) && document.activeElement !== inputs[k]) {
+      ['quietTarget', 'loudTarget', 'alertDb', 'alertSeconds', 'barkUrl',
+       'turnUrl', 'turnUsername', 'turnCredential'].forEach(k => {
+        if (!dirtyKeys.has(k) && document.activeElement !== inputs[k] &&
+            inputs[k] && st.settings[k] != null) {
           inputs[k].value = st.settings[k];
         }
       });
@@ -387,11 +419,14 @@
     }
     async function saveSettings(extra) {
       const payload = {
-        quietTarget:  QG.clampInt(inputs.quietTarget.value, 0, 120, 40),
-        loudTarget:   QG.clampInt(inputs.loudTarget.value, 0, 120, 80),
-        alertDb:      QG.clampInt(inputs.alertDb.value, 0, 120, 80),
-        alertSeconds: QG.clampInt(inputs.alertSeconds.value, 5, 3600, 60),
-        barkUrl:      inputs.barkUrl.value.trim(),
+        quietTarget:    QG.clampInt(inputs.quietTarget.value, 0, 120, 40),
+        loudTarget:     QG.clampInt(inputs.loudTarget.value, 0, 120, 80),
+        alertDb:        QG.clampInt(inputs.alertDb.value, 0, 120, 80),
+        alertSeconds:   QG.clampInt(inputs.alertSeconds.value, 5, 3600, 60),
+        barkUrl:        inputs.barkUrl.value.trim(),
+        turnUrl:        inputs.turnUrl.value.trim(),
+        turnUsername:   inputs.turnUsername.value.trim(),
+        turnCredential: inputs.turnCredential.value.trim(),
       };
       // schedule comes from current edited state if dirty, else server's last view.
       payload.schedule = collectScheduleFromUI();
@@ -513,18 +548,24 @@
 
     // ====================== WebRTC: teacher initiates ======================
 
-    const ICE_SERVERS = [
-      { urls: 'stun:stun.l.google.com:19302' },
-      { urls: 'stun:stun1.l.google.com:19302' },
-      { urls: 'stun:stun.cloudflare.com:3478' },
-    ];
-
     let pc = null;
     let localStream = null;
+    let routeTimer = null;
+    const webrtcRoute = $('webrtcRoute');
 
     function setWebrtcStatus(text, kind) {
       webrtcStatus.textContent = text;
       webrtcStatus.className = 'webrtc-status' + (kind ? ' ' + kind : '');
+    }
+    function setRouteBadge(type) {
+      const d = QG.describeConnectionType(type);
+      webrtcRoute.hidden = false;
+      webrtcRoute.textContent = d.text;
+      webrtcRoute.className = 'webrtc-route' + (d.cls ? ' ' + d.cls : '');
+    }
+    function clearRouteBadge() {
+      webrtcRoute.hidden = true; webrtcRoute.textContent = '';
+      if (routeTimer) { clearInterval(routeTimer); routeTimer = null; }
     }
 
     async function startCall() {
@@ -543,9 +584,14 @@
         setWebrtcStatus('无法获取本机麦克风：' + (err.message || err), 'err');
         return;
       }
-      pc = new RTCPeerConnection({ iceServers: ICE_SERVERS });
+      // Build ICE config from current settings (STUN + optional TURN).
+      const iceServers = QG.buildIceServers(lastState && lastState.settings);
+      pc = new RTCPeerConnection({
+        iceServers,
+        // 'all' = try direct first, fall back to TURN relay if direct fails.
+        iceTransportPolicy: 'all',
+      });
       localStream.getTracks().forEach(t => pc.addTrack(t, localStream));
-      // We'll also be a receiver of student video + audio
       try { pc.addTransceiver('video', { direction: 'recvonly' }); } catch (_) {}
 
       pc.ontrack = (e) => {
@@ -559,17 +605,26 @@
       pc.onicecandidate = (e) => {
         if (e.candidate) sendSignal('ice', e.candidate.toJSON());
       };
-      pc.onconnectionstatechange = () => {
+      pc.onconnectionstatechange = async () => {
         if (!pc) return;
         const s = pc.connectionState;
         if (s === 'connected') {
           setWebrtcStatus('✅ 已连接', 'ok');
           hangupBtn.disabled = false;
           muteBtn.disabled = false;
+          // Probe how the connection was established and re-probe periodically
+          // (ICE can renegotiate from direct → relay if direct path drops).
+          const update = async () => {
+            const t = await QG.probeConnectionType(pc);
+            setRouteBadge(t);
+          };
+          await update();
+          if (routeTimer) clearInterval(routeTimer);
+          routeTimer = setInterval(update, 5000);
         } else if (s === 'connecting') {
           setWebrtcStatus('正在协商连接…');
         } else if (s === 'failed') {
-          setWebrtcStatus('连接失败（可能受 NAT 限制）', 'err');
+          setWebrtcStatus('连接失败（无可用直连路径，且未配置 TURN）', 'err');
           cleanupCall();
         } else if (s === 'disconnected' || s === 'closed') {
           setWebrtcStatus('已断开');
@@ -599,6 +654,7 @@
       hangupBtn.disabled = true;
       muteBtn.disabled = true;
       muteBtn.textContent = '🔇 静音我';
+      clearRouteBadge();
     }
 
     function sendSignal(type, data) {

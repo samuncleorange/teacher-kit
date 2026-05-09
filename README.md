@@ -94,14 +94,15 @@
 
 时间按服务器本地时间，请将服务器时区设置为学校所在时区（例如：`TZ=Asia/Shanghai python3 server.py`）。
 
-### 4. **远程摄像头 + 双向对讲** 🆕（按需开启）
+### 4. **远程摄像头 + 双向对讲** 🆕（按需开启 · P2P 优先 · TURN 中转兜底）
 为了节省流量，**摄像头/麦克风默认是关闭的**，仅当老师点击「开始连接」时才会临时启用：
 
-- 通过 **WebRTC 点对点连接**，视频和音频不经过本服务器，仅用作信令中转
-- 学生端（教室那台电脑）会弹出摄像头/麦克风权限请求
-- 老师端可以听到、看到课堂，并通过自己的麦克风**与课堂双向对讲**
-- 任意一方点击「挂断」即立刻关闭摄像头并停止上行流量
-- 默认使用 Google + Cloudflare 公共 STUN 服务器，复杂 NAT 可能需要自备 TURN（局域网/同 Wi-Fi 通常无问题）
+- 通过 **WebRTC** 建立连接，**优先 P2P 直连**——音视频不经过服务器，零流量成本
+- ICE 自动协商：**直连失败时自动 fall back 到 TURN 中转**（需自行部署或填入第三方 TURN）
+- 老师端 + 学生端都会显示 `🏠 直连` / `🌐 P2P 穿透 NAT` / `🛰 服务器中转` 实时徽章，一眼看懂当前走的什么路径
+- 双向对讲：老师麦克风 ⇄ 课堂麦克风（默认开 echoCancellation 防回声）
+- 任意一方点击「挂断」即立刻关闭摄像头与上行流量
+- TURN 部署：参见 [`docs/coturn-setup.md`](docs/coturn-setup.md)（5 分钟版 apt 一键搞定）
 
 ### 5. Bark 推送
 - 老师端填入 Bark URL（iOS App 提供）
@@ -200,6 +201,16 @@ python3 server.py
 | POST | `/api/test-bark/<pin>` | 测试 Bark 推送 |
 | POST | `/api/reset` | 重置花园：`{pin}` |
 
+### TURN / WebRTC ICE 配置（settings 字段）
+```json
+"turnUrl":        "turn:你的域名:3478?transport=udp,turn:你的域名:3478?transport=tcp",
+"turnUsername":   "quiet",
+"turnCredential": "你设的强密码"
+```
+- 留空：仅使用公共 STUN（P2P-only，复杂 NAT 下会失败）
+- 填入：ICE 仍然**优先 P2P 直连**，仅当直连失败才走 TURN 中转
+- 多条 URI 用逗号或空白分隔（一般同时配 UDP + TCP 备用）
+
 ### 课表数据格式
 ```json
 "schedule": [
@@ -256,11 +267,12 @@ node tools/screenshots.js
 A: 一定要点击「🎤 开始检测」按钮。浏览器要求用户主动点击才能授权麦克风。
 
 **Q: 远程摄像头连接不上？**
-A: 检查：
+A: 检查（按命中概率排序）：
 1. 学生端是否在线（老师端右上角小绿点）
 2. 学生端浏览器是否同意了摄像头/麦克风权限
-3. 双方网络是否在同一个局域网，或服务器域名是否走 HTTPS
-4. 复杂 NAT 环境可能需要自备 TURN 服务器
+3. 老师端 + 学生端是否都走 HTTPS / localhost（http+IP 浏览器会拒绝）
+4. **跨网络且 P2P 失败** → 老师端展开「⚙ 高级：TURN 中转配置」，填入 TURN URI/用户/密码。如还没有 TURN 服务器，照着 [`docs/coturn-setup.md`](docs/coturn-setup.md) 5 分钟装一套即可
+5. 看徽章：连上后会显示 `🏠 直连 / 🌐 P2P / 🛰 中转`，能直接定位是直连失败还是中转失败
 
 **Q: 课表时间不准？**
 A: 服务器使用本地时间。在云服务器上务必设置时区，例如：

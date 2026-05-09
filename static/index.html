@@ -339,15 +339,10 @@
 
     // ====================== WebRTC answer (student side) ======================
 
-    const ICE_SERVERS = [
-      { urls: 'stun:stun.l.google.com:19302' },
-      { urls: 'stun:stun1.l.google.com:19302' },
-      { urls: 'stun:stun.cloudflare.com:3478' },
-    ];
-
     let pc = null;            // RTCPeerConnection
     let callStream = null;    // separate getUserMedia stream for the call (camera+mic, EC on)
     let pendingIce = [];      // ICE candidates that arrived before we set remote desc
+    let routeProbeTimer = null;
 
     async function handleSignal(msg) {
       if (!msg || msg.from === 'student') return; // ignore our own
@@ -386,7 +381,10 @@
         sendStudentSignal('hangup', null);
         return;
       }
-      pc = new RTCPeerConnection({ iceServers: ICE_SERVERS });
+      // Mirror teacher's iceServers from the broadcast settings (so the same
+      // TURN config works on both sides).
+      const iceServers = QG.buildIceServers(serverState && serverState.settings);
+      pc = new RTCPeerConnection({ iceServers, iceTransportPolicy: 'all' });
       callStream.getTracks().forEach(t => pc.addTrack(t, callStream));
 
       pc.ontrack = (e) => {
@@ -404,10 +402,18 @@
       pc.onicecandidate = (e) => {
         if (e.candidate) sendStudentSignal('ice', e.candidate.toJSON());
       };
-      pc.onconnectionstatechange = () => {
+      pc.onconnectionstatechange = async () => {
         if (!pc) return;
         if (pc.connectionState === 'connected') {
-          showCallBanner('🎥 老师正在远程查看 + 对讲');
+          // Show students whether teacher's traffic is going direct or via relay.
+          const updateBanner = async () => {
+            const t = await QG.probeConnectionType(pc);
+            const d = QG.describeConnectionType(t);
+            showCallBanner('🎥 老师正在远程查看 + 对讲 · ' + d.text);
+          };
+          await updateBanner();
+          if (routeProbeTimer) clearInterval(routeProbeTimer);
+          routeProbeTimer = setInterval(updateBanner, 5000);
         } else if (['failed','disconnected','closed'].includes(pc.connectionState)) {
           cleanupCall();
         }
@@ -433,6 +439,7 @@
       const audioEl = document.getElementById('teacherAudio');
       if (audioEl) audioEl.srcObject = null;
       pendingIce = [];
+      if (routeProbeTimer) { clearInterval(routeProbeTimer); routeProbeTimer = null; }
     }
 
     function sendStudentSignal(type, data) {

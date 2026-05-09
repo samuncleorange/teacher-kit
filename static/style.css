@@ -594,6 +594,64 @@ footer {
 .webrtc-status.ok  { color: #2d8b5a; background: #d4f0d8; }
 .webrtc-status.err { color: #d6553b; background: #ffd9d1; }
 
+.webrtc-route {
+  font-size: 12px;
+  background: #e0ecf6;
+  color: #4a6a85;
+  padding: 4px 12px;
+  border-radius: 999px;
+  font-weight: 600;
+}
+.webrtc-route.ok   { background: #d4f0d8; color: #2d8b5a; }
+.webrtc-route.warn { background: #fff1d6; color: #a16a1f; }
+.webrtc-route[hidden] { display: none; }
+
+/* TURN advanced section (collapsible) */
+.webrtc-turn {
+  margin-top: 12px;
+  margin-bottom: 12px;
+  background: #f0f7fd;
+  border-radius: 12px;
+  padding: 8px 12px;
+}
+.webrtc-turn > summary {
+  cursor: pointer;
+  font-size: 13px;
+  font-weight: 600;
+  color: #4a6a85;
+  padding: 4px 0;
+  list-style: none;
+  user-select: none;
+}
+.webrtc-turn > summary::-webkit-details-marker { display: none; }
+.webrtc-turn > summary::before {
+  content: '▸';
+  display: inline-block;
+  margin-right: 6px;
+  transition: transform 0.15s ease;
+}
+.webrtc-turn[open] > summary::before { transform: rotate(90deg); }
+.webrtc-turn-body {
+  display: flex; flex-direction: column; gap: 8px;
+  margin-top: 8px;
+}
+.webrtc-turn-body .setting { background: #fff; }
+.webrtc-turn-help {
+  font-size: 12px;
+  color: #4a6a85;
+  margin-top: 8px;
+  line-height: 1.7;
+  background: #fff8e6;
+  padding: 8px 12px;
+  border-radius: 10px;
+  border-left: 3px solid #f5b27a;
+}
+.webrtc-turn-help a { color: #0a4d7e; }
+.webrtc-turn-help code {
+  background: #fff; padding: 1px 5px; border-radius: 4px;
+  font-family: ui-monospace, monospace; color: #0a4d7e;
+}
+
 .webrtc-stage {
   position: relative;
   width: 100%;

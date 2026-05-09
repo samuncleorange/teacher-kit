@@ -49,9 +49,17 @@ DEFAULT_SETTINGS = {
     # day 0 = Monday … 6 = Sunday (matches Python time.localtime().tm_wday)
     # An empty schedule means "always monitoring" (legacy behaviour).
     "schedule": [],
+    # TURN relay (server fallback for WebRTC when P2P direct connection
+    # fails — e.g. symmetric NAT, captive portals, blocked UDP).
+    # Multiple TURN URIs can be provided separated by commas, e.g.
+    #   turn:turn.example.com:3478?transport=udp,turn:turn.example.com:3478?transport=tcp
+    # Empty turnUrl means "STUN-only" (P2P only, may fail across NATs).
+    "turnUrl": "",
+    "turnUsername": "",
+    "turnCredential": "",
 }
 INT_SETTING_KEYS = {"quietTarget", "loudTarget", "alertDb", "alertSeconds"}
-STR_SETTING_KEYS = {"barkUrl"}
+STR_SETTING_KEYS = {"barkUrl", "turnUrl", "turnUsername", "turnCredential"}
 LIST_SETTING_KEYS = {"schedule"}
 SETTINGS_KEYS = INT_SETTING_KEYS | STR_SETTING_KEYS | LIST_SETTING_KEYS
 
@@ -280,8 +288,9 @@ class ClassState:
                         self.settings[k] = int(float(new_settings[k]))
                     except (TypeError, ValueError):
                         pass
-            if "barkUrl" in new_settings:
-                self.settings["barkUrl"] = str(new_settings["barkUrl"]).strip()
+            for k in STR_SETTING_KEYS:
+                if k in new_settings:
+                    self.settings[k] = str(new_settings[k]).strip()
             if "schedule" in new_settings:
                 self.settings["schedule"] = sanitize_schedule(new_settings["schedule"])
         persist_all_settings()

@@ -120,6 +120,89 @@
     return Math.max(0, Math.ceil((totalMs - elapsedMs) / 1000));
   }
 
+  // ---- WebRTC helpers (shared by student & teacher) ----
+
+  // Public STUN servers (used for P2P NAT traversal — free, low latency).
+  const DEFAULT_STUN = [
+    { urls: 'stun:stun.l.google.com:19302' },
+    { urls: 'stun:stun1.l.google.com:19302' },
+    { urls: 'stun:stun.cloudflare.com:3478' },
+  ];
+
+  // Build an iceServers list from broadcast settings:
+  //   - always include public STUN (cheap)
+  //   - if settings.turnUrl is set, append it as a TURN entry; multiple URIs
+  //     can be comma- or whitespace-separated for redundancy
+  // Returns: [{urls}, ..., {urls:[turn], username, credential}]
+  function buildIceServers(settings) {
+    const servers = [...DEFAULT_STUN];
+    if (settings && typeof settings.turnUrl === 'string') {
+      const urls = settings.turnUrl
+        .split(/[\s,]+/)
+        .map(s => s.trim())
+        .filter(s => /^turns?:/i.test(s));
+      if (urls.length > 0) {
+        const entry = { urls };
+        if (settings.turnUsername)   entry.username   = String(settings.turnUsername);
+        if (settings.turnCredential) entry.credential = String(settings.turnCredential);
+        servers.push(entry);
+      }
+    }
+    return servers;
+  }
+
+  // Inspect the currently active candidate pair on a connected
+  // RTCPeerConnection. Returns one of:
+  //   'host'  — LAN / same-host direct
+  //   'srflx' — server-reflexive (P2P with STUN help)
+  //   'prflx' — peer-reflexive (P2P, learned from peer)
+  //   'relay' — TURN-relayed (going through the server)
+  //   null    — no active pair yet
+  // Used for the "直连 / 中转" UI badge after a call connects.
+  async function probeConnectionType(pc) {
+    if (!pc || !pc.getStats) return null;
+    try {
+      const stats = await pc.getStats(null);
+      let pair = null;
+      stats.forEach(r => {
+        if (r.type === 'candidate-pair' && r.state === 'succeeded' &&
+            (r.nominated || r.selected)) {
+          pair = r;
+        }
+      });
+      if (!pair) {
+        // Fallback for browsers that don't set 'nominated' on the selected pair.
+        stats.forEach(r => {
+          if (!pair && r.type === 'candidate-pair' && r.state === 'succeeded') pair = r;
+        });
+      }
+      if (!pair) return null;
+      let local = null, remote = null;
+      stats.forEach(r => {
+        if (r.id === pair.localCandidateId) local = r;
+        if (r.id === pair.remoteCandidateId) remote = r;
+      });
+      if ((local && local.candidateType === 'relay') ||
+          (remote && remote.candidateType === 'relay')) {
+        return 'relay';
+      }
+      if (local && local.candidateType) return local.candidateType;
+      return null;
+    } catch (_) {
+      return null;
+    }
+  }
+
+  function describeConnectionType(type) {
+    switch (type) {
+      case 'host':  return { text: '🏠 直连（同网段）',         cls: 'ok' };
+      case 'srflx': return { text: '🌐 P2P 直连（穿透 NAT）',    cls: 'ok' };
+      case 'prflx': return { text: '🌐 P2P 直连（对等反射）',    cls: 'ok' };
+      case 'relay': return { text: '🛰 服务器中转（TURN）',     cls: 'warn' };
+      default:      return { text: '… 协商中',                 cls: '' };
+    }
+  }
+
   global.QG = {
     MAX_DB_DISPLAY,
     pineSvg,
@@ -128,5 +211,9 @@
     updateMarkers,
     clampInt,
     fmtSecondsRemaining,
+    DEFAULT_STUN,
+    buildIceServers,
+    probeConnectionType,
+    describeConnectionType,
   };
 })(window);
