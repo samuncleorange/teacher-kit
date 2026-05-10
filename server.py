@@ -667,6 +667,10 @@ class Handler(http.server.BaseHTTPRequestHandler):
         if path == "/" or path == "/index.html":
             return self._serve_static("index.html")
 
+        # Diagnostic page for WebSocket relay troubleshooting.
+        if path == "/relay-test" or path == "/relay-test.html":
+            return self._serve_static("relay-test.html")
+
         m = re.match(r"^/teacher/(\d{4})/?$", path)
         if m:
             return self._serve_static("teacher.html")

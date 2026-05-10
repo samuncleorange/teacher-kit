@@ -1,0 +1,241 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>WebSocket 中转诊断 · 安静花园</title>
+<style>
+  body { font-family: -apple-system, "PingFang SC", "Microsoft YaHei", sans-serif;
+         max-width: 920px; margin: 24px auto; padding: 0 16px; color: #1c3d5a;
+         background: #f3f8fc; }
+  h1 { font-size: 22px; }
+  h2 { font-size: 16px; margin-top: 24px; padding-bottom: 6px; border-bottom: 2px solid #cfe8fb; }
+  .row { background: #fff; border-radius: 12px; padding: 14px 18px; margin: 12px 0;
+         box-shadow: 0 2px 8px rgba(0,0,0,0.05); }
+  .ok  { color: #2d8b5a; font-weight: 600; }
+  .err { color: #d6553b; font-weight: 600; }
+  .warn{ color: #a16a1f; font-weight: 600; }
+  pre  { background: #f0f7fd; padding: 8px 12px; border-radius: 6px; overflow-x: auto;
+         font-size: 12px; margin: 8px 0; white-space: pre-wrap; word-break: break-all; }
+  code { background: #f0f7fd; padding: 1px 6px; border-radius: 4px; font-size: 13px; }
+  button { font-size: 15px; padding: 10px 18px; border-radius: 10px; border: none;
+           background: linear-gradient(135deg, #5fbc88, #2d8b5a); color: #fff;
+           cursor: pointer; font-weight: 600; box-shadow: 0 2px 6px rgba(0,0,0,0.12);
+           margin-right: 8px; margin-bottom: 6px; }
+  button:disabled { opacity: 0.5; cursor: not-allowed; }
+  button.secondary { background: linear-gradient(135deg, #f59783, #d6553b); }
+  button.ghost { background: #fff; color: #0a4d7e; box-shadow: 0 1px 3px rgba(0,0,0,0.1); }
+  #log { background: #0d2640; color: #cfe8fb; padding: 12px; border-radius: 8px;
+         font-family: ui-monospace, "SF Mono", Menlo, monospace; font-size: 12px;
+         line-height: 1.6; min-height: 200px; max-height: 400px; overflow-y: auto;
+         white-space: pre-wrap; }
+  .row .label { display: inline-block; min-width: 140px; color: #4a6a85; }
+  .pin-box { background: #fff8e6; border-left: 3px solid #f5b27a; padding: 10px 14px;
+             border-radius: 8px; margin: 12px 0; font-size: 14px; }
+  input[type=text] { padding: 6px 10px; border: 1px solid #cfe8fb; border-radius: 6px;
+                     font-size: 14px; }
+</style>
+</head>
+<body>
+
+<h1>🔧 WebSocket 中转诊断</h1>
+<div class="pin-box">
+  这一页用来定位「服务器中转看不到视频」是<b>反代不支持 WebSocket 升级</b>，<b>编码不兼容</b>，还是别的问题。
+  按顺序点下面的三个按钮即可。
+</div>
+
+<h2>1️⃣ 浏览器能力扫描</h2>
+<div class="row" id="capsRow">
+  <div><span class="label">UA：</span><code id="ua">…</code></div>
+  <div><span class="label">MediaRecorder：</span><span id="hasMR">…</span></div>
+  <div><span class="label">MediaSource：</span><span id="hasMS">…</span></div>
+  <div><span class="label">WebSocket：</span><span id="hasWS">…</span></div>
+  <div style="margin-top:8px"><b>能录的 mime（MediaRecorder）：</b></div>
+  <pre id="recMimes"></pre>
+  <div><b>能播的 mime（MediaSource）：</b></div>
+  <pre id="decMimes"></pre>
+</div>
+
+<h2>2️⃣ WebSocket 握手测试</h2>
+<div class="row">
+  <div>
+    <span class="label">PIN：</span>
+    <input type="text" id="testPin" value="9999" maxlength="4" pattern="[0-9]{4}" style="width:80px">
+    <span class="label" style="margin-left:14px">角色：</span>
+    <select id="testRole">
+      <option value="teacher">teacher</option>
+      <option value="student">student</option>
+    </select>
+  </div>
+  <div style="margin-top:10px">
+    <button id="connectBtn">▶ 打开 WebSocket</button>
+    <button id="pingBtn" disabled>📨 发送 ping 测试帧</button>
+    <button id="closeBtn" class="secondary" disabled>✕ 关闭</button>
+  </div>
+  <div style="margin-top:12px">
+    <span class="label">URL：</span><code id="wsUrl">—</code>
+  </div>
+  <div style="margin-top:6px">
+    <span class="label">状态：</span><span id="wsState">未连接</span>
+  </div>
+</div>
+
+<h2>3️⃣ 实时日志</h2>
+<div id="log"></div>
+
+<h2>📋 一键复制全部诊断信息</h2>
+<div class="row">
+  <button id="copyBtn" class="ghost">复制到剪贴板</button>
+  <span id="copyStatus" style="margin-left:10px;font-size:13px;color:#4a6a85"></span>
+  <p style="font-size:13px;color:#4a6a85;margin-top:8px;line-height:1.6">
+    把上面这个按钮点一下，然后把内容粘贴回来。包含：UA、能力扫描结果、WS 测试日志，方便定位问题。
+  </p>
+</div>
+
+<script src="/static/relay.js"></script>
+<script>
+(function () {
+  'use strict';
+  const $ = (id) => document.getElementById(id);
+  const logEl = $('log');
+  let ws = null;
+  let pingCount = 0;
+
+  function log(line, kind) {
+    const ts = new Date().toISOString().slice(11, 23);
+    const prefix = kind === 'err' ? '❌ ' : kind === 'ok' ? '✅ ' : kind === 'warn' ? '⚠ ' : '· ';
+    logEl.textContent += `[${ts}] ${prefix}${line}\n`;
+    logEl.scrollTop = logEl.scrollHeight;
+  }
+  function setState(s, kind) {
+    $('wsState').textContent = s;
+    $('wsState').className = kind || '';
+  }
+
+  // 1. capabilities
+  (function() {
+    const caps = QGRelay.discoverCaps();
+    $('ua').textContent = caps.ua || '(unknown)';
+    $('hasMR').textContent = caps.mr ? '✓ 支持' : '✗ 缺失';
+    $('hasMR').className = caps.mr ? 'ok' : 'err';
+    $('hasMS').textContent = caps.ms ? '✓ 支持' : '✗ 缺失';
+    $('hasMS').className = caps.ms ? 'ok' : 'err';
+    $('hasWS').textContent = (typeof WebSocket !== 'undefined') ? '✓ 支持' : '✗ 缺失';
+    $('hasWS').className = (typeof WebSocket !== 'undefined') ? 'ok' : 'err';
+    $('recMimes').textContent = caps.record.length
+      ? caps.record.map(m => '  ✓ ' + m).join('\n')
+      : '  (无 — MediaRecorder 不可用)';
+    $('decMimes').textContent = caps.decode.length
+      ? caps.decode.map(m => '  ✓ ' + m).join('\n')
+      : '  (无 — MediaSource 不可用)';
+  })();
+
+  // 2. ws test
+  function connect() {
+    const pin = $('testPin').value.trim();
+    const role = $('testRole').value;
+    if (!/^\d{4}$/.test(pin)) { alert('PIN 必须 4 位数字'); return; }
+    const proto = (location.protocol === 'https:') ? 'wss:' : 'ws:';
+    const url = `${proto}//${location.host}/api/relay/${pin}/${role}`;
+    $('wsUrl').textContent = url;
+    log('opening ' + url);
+    setState('正在连接…', 'warn');
+
+    try { ws = new WebSocket(url); }
+    catch (e) { log('new WebSocket() threw: ' + e.message, 'err'); setState('构造失败', 'err'); return; }
+
+    ws.binaryType = 'arraybuffer';
+    ws.onopen = () => {
+      log('onopen — 握手成功，readyState=' + ws.readyState, 'ok');
+      setState('已连接 (readyState=' + ws.readyState + ')', 'ok');
+      $('pingBtn').disabled = false;
+      $('closeBtn').disabled = false;
+      $('connectBtn').disabled = true;
+    };
+    ws.onmessage = (e) => {
+      if (typeof e.data === 'string') {
+        log('RX text (' + e.data.length + ' chars): ' + e.data.slice(0, 200));
+      } else if (e.data instanceof ArrayBuffer) {
+        log('RX binary (' + e.data.byteLength + ' bytes)');
+      } else {
+        log('RX (unknown type): ' + (typeof e.data));
+      }
+    };
+    ws.onerror = (e) => {
+      log('onerror — 连接出错（多半是反代不放行 Upgrade，或者 SSL/CORS 问题）', 'err');
+      setState('错误', 'err');
+    };
+    ws.onclose = (e) => {
+      log('onclose — code=' + e.code + ' reason="' + (e.reason || '') + '" wasClean=' + e.wasClean,
+          e.code === 1000 ? 'ok' : 'err');
+      // 常见 close code 解读
+      const meaning = ({
+        1000: '正常关闭',
+        1001: '对端走了',
+        1002: '协议错误',
+        1006: '异常关闭（多半是反代/网络层面被切，常见于 Upgrade 没转发）',
+        1009: '帧太大',
+        1011: '服务端内部错误',
+        1015: 'TLS 握手失败',
+      })[e.code];
+      if (meaning) log('  含义：' + meaning, e.code === 1006 ? 'err' : 'warn');
+      setState('已关闭 (code=' + e.code + ')', e.code === 1000 ? '' : 'err');
+      $('pingBtn').disabled = true;
+      $('closeBtn').disabled = true;
+      $('connectBtn').disabled = false;
+    };
+  }
+
+  $('connectBtn').addEventListener('click', connect);
+  $('pingBtn').addEventListener('click', () => {
+    if (!ws || ws.readyState !== 1) return;
+    pingCount++;
+    const msg = JSON.stringify({ type: 'diag-ping', n: pingCount, ts: Date.now() });
+    log('TX text: ' + msg);
+    try { ws.send(msg); } catch (e) { log('send failed: ' + e.message, 'err'); }
+    // also a binary frame
+    const buf = new TextEncoder().encode('binary-ping-' + pingCount);
+    log('TX binary: ' + buf.byteLength + ' bytes');
+    try { ws.send(buf); } catch (e) { log('binary send failed: ' + e.message, 'err'); }
+  });
+  $('closeBtn').addEventListener('click', () => {
+    if (ws) { try { ws.close(1000, 'user'); } catch (_) {} }
+  });
+
+  $('copyBtn').addEventListener('click', async () => {
+    const text =
+      '=== WebSocket 中转诊断 ===\n' +
+      'page url: ' + location.href + '\n' +
+      'UA: ' + (navigator.userAgent || '') + '\n\n' +
+      '--- 能录 (record) ---\n' +
+      $('recMimes').textContent + '\n' +
+      '--- 能播 (decode) ---\n' +
+      $('decMimes').textContent + '\n\n' +
+      '--- WebSocket 测试 ---\n' +
+      'WS URL: ' + $('wsUrl').textContent + '\n' +
+      '状态: ' + $('wsState').textContent + '\n\n' +
+      '--- 日志 ---\n' +
+      logEl.textContent;
+    try {
+      await navigator.clipboard.writeText(text);
+      $('copyStatus').textContent = '✅ 已复制，粘贴回来即可';
+      $('copyStatus').className = 'ok';
+    } catch (e) {
+      $('copyStatus').textContent = '复制失败：' + e.message + '。请手动选中下面的文本';
+      $('copyStatus').className = 'err';
+      // dump to log so user can copy manually
+      logEl.textContent = text + '\n\n=== 之前的日志 ===\n' + logEl.textContent;
+    }
+  });
+
+  // 默认 PIN 用 1234（与你截图测试的 PIN 一致）
+  if (location.search.includes('pin=')) {
+    const m = location.search.match(/pin=(\d{4})/);
+    if (m) $('testPin').value = m[1];
+  } else {
+    $('testPin').value = '1234';
+  }
+})();
+</script>
+</body>
+</html>
