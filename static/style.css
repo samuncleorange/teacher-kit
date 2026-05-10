@@ -606,6 +606,23 @@ footer {
 .webrtc-route.warn { background: #fff1d6; color: #a16a1f; }
 .webrtc-route[hidden] { display: none; }
 
+.webrtc-mode {
+  display: flex; flex-wrap: wrap; gap: 12px 18px;
+  align-items: center;
+  background: #f0f7fd;
+  border-radius: 10px;
+  padding: 8px 12px;
+  margin-bottom: 12px;
+  font-size: 13px;
+}
+.webrtc-mode label {
+  display: inline-flex; align-items: center; gap: 4px;
+  cursor: pointer;
+  user-select: none;
+  color: #1c3d5a;
+}
+.webrtc-mode input[type="radio"] { accent-color: #2d8b5a; cursor: pointer; }
+
 /* TURN advanced section (collapsible) */
 .webrtc-turn {
   margin-top: 12px;

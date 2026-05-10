@@ -161,6 +161,11 @@
         <span class="webrtc-status" id="webrtcStatus">未连接</span>
         <span class="webrtc-route" id="webrtcRoute" hidden></span>
       </div>
+      <div class="webrtc-mode">
+        <span style="font-size:13px;color:#4a6a85">传输模式：</span>
+        <label><input type="radio" name="callmode" value="auto" checked> 自动（P2P 优先 → 中转兜底）</label>
+        <label><input type="radio" name="callmode" value="relay"> 强制服务器中转（调试用）</label>
+      </div>
       <div class="webrtc-stage" id="webrtcStage">
         <video id="remoteVideo" class="webrtc-video" autoplay playsinline muted></video>
         <div class="webrtc-overlay" id="webrtcOverlay">点击「开始连接」请求查看学生端摄像头与课堂声音</div>
@@ -607,9 +612,18 @@
         setWebrtcStatus('无法获取本机麦克风：' + (err.message || err), 'err');
         return;
       }
-      mode = 'p2p';
       callBtn.disabled = true;
-      await tryP2P();
+      // Honor "强制服务器中转" radio: skip P2P entirely.
+      const forced = document.querySelector('input[name="callmode"]:checked').value;
+      if (forced === 'relay') {
+        mode = 'relay';
+        sendSignal('fallback-relay', null);
+        setWebrtcStatus('强制中转模式 · 切换到服务器中转…');
+        await startRelay();
+      } else {
+        mode = 'p2p';
+        await tryP2P();
+      }
     }
 
     async function tryP2P() {
