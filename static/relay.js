@@ -58,20 +58,40 @@
 
   function isVideoMime(m) { return m && m.indexOf(VIDEO_PREFIX) === 0; }
 
+  // The MediaSource implementation actually present on this browser.
+  // iPhone Safari (≥17.1) only exposes ManagedMediaSource — same surface
+  // for our purposes (addSourceBuffer / appendBuffer / isTypeSupported
+  // all work), but it must be wired up via .srcObject (not URL.createObjectURL)
+  // and the <video>/<audio> element must have disableRemotePlayback=true.
+  function getMediaSourceCtor() {
+    if (typeof MediaSource !== 'undefined') return MediaSource;
+    if (typeof ManagedMediaSource !== 'undefined') return ManagedMediaSource;
+    if (typeof self !== 'undefined' && self.ManagedMediaSource) return self.ManagedMediaSource;
+    return null;
+  }
+
   // Discover capabilities of THIS browser.
   function discoverCaps() {
-    const out = { record: [], decode: [], ua: '', mr: false, ms: false };
+    const MSC = getMediaSourceCtor();
+    const out = {
+      record: [], decode: [],
+      ua: '', mr: false, ms: false, msKind: null,
+    };
     try { out.ua = navigator.userAgent; } catch (_) {}
     out.mr = (typeof MediaRecorder !== 'undefined');
-    out.ms = (typeof MediaSource !== 'undefined');
+    out.ms = !!MSC;
+    if (MSC) {
+      out.msKind = (MSC === (typeof MediaSource !== 'undefined' && MediaSource))
+        ? 'MediaSource' : 'ManagedMediaSource';
+    }
     if (out.mr) {
       for (const m of ALL_MIMES) {
         try { if (MediaRecorder.isTypeSupported(m)) out.record.push(m); } catch (_) {}
       }
     }
-    if (out.ms) {
+    if (MSC && typeof MSC.isTypeSupported === 'function') {
       for (const m of ALL_MIMES) {
-        try { if (MediaSource.isTypeSupported(m)) out.decode.push(m); } catch (_) {}
+        try { if (MSC.isTypeSupported(m)) out.decode.push(m); } catch (_) {}
       }
     }
     return out;
@@ -304,16 +324,32 @@
         if (this.onError) this.onError(new Error('对端未声明编码'));
         return;
       }
-      if (typeof MediaSource === 'undefined' || !MediaSource.isTypeSupported(mime)) {
+      const MSC = getMediaSourceCtor();
+      if (!MSC || typeof MSC.isTypeSupported !== 'function' || !MSC.isTypeSupported(mime)) {
         if (this.onError) this.onError(
           new Error('本浏览器不支持解码对端的 ' + mime +
-                    '；它可能录的是 webm/mp4 等本地无法播放的格式。'));
+                    '；它可能录的是本机 MediaSource 无法播放的格式。'));
         return;
       }
       this.recvMime = mime;
       this._closeReceiver();
-      this.mediaSource = new MediaSource();
-      this.mediaEl.src = URL.createObjectURL(this.mediaSource);
+      this.mediaSource = new MSC();
+
+      // ManagedMediaSource (iPhone Safari 17.1+) needs srcObject wiring +
+      // disableRemotePlayback. Plain MediaSource works with URL.createObjectURL.
+      const isManaged = (typeof ManagedMediaSource !== 'undefined' &&
+                         this.mediaSource instanceof ManagedMediaSource);
+      if (isManaged) {
+        try { this.mediaEl.disableRemotePlayback = true; } catch (_) {}
+        try { this.mediaEl.srcObject = this.mediaSource; }
+        catch (_) {
+          // Fallback if browser refuses srcObject for MMS (shouldn't happen on iOS 17.1+)
+          try { this.mediaEl.src = URL.createObjectURL(this.mediaSource); } catch (_) {}
+        }
+      } else {
+        this.mediaEl.src = URL.createObjectURL(this.mediaSource);
+      }
+
       this.mediaSource.addEventListener('sourceopen', () => {
         try {
           this.sourceBuffer = this.mediaSource.addSourceBuffer(mime);
@@ -325,6 +361,11 @@
           if (this.onError) this.onError(new Error('addSourceBuffer 失败：' + e.message));
         }
       });
+
+      // ManagedMediaSource emits startstreaming/endstreaming to control buffering.
+      // We don't pause sending on endstreaming (server pace is already throttled),
+      // but exposing a `play()` retry helps Safari kick off playback.
+      this.mediaEl.play && this.mediaEl.play().catch(() => {});
     }
 
     _flush() {

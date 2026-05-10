@@ -49,6 +49,7 @@
   <div><span class="label">UA：</span><code id="ua">…</code></div>
   <div><span class="label">MediaRecorder：</span><span id="hasMR">…</span></div>
   <div><span class="label">MediaSource：</span><span id="hasMS">…</span></div>
+  <div><span class="label">↳ 实际 API：</span><span id="msKind">…</span></div>
   <div><span class="label">WebSocket：</span><span id="hasWS">…</span></div>
   <div style="margin-top:8px"><b>能录的 mime（MediaRecorder）：</b></div>
   <pre id="recMimes"></pre>
@@ -120,6 +121,9 @@
     $('hasMR').className = caps.mr ? 'ok' : 'err';
     $('hasMS').textContent = caps.ms ? '✓ 支持' : '✗ 缺失';
     $('hasMS').className = caps.ms ? 'ok' : 'err';
+    $('msKind').textContent = caps.msKind || '(都没有)';
+    $('msKind').className = caps.msKind === 'ManagedMediaSource' ? 'warn' :
+                              caps.msKind === 'MediaSource' ? 'ok' : 'err';
     $('hasWS').textContent = (typeof WebSocket !== 'undefined') ? '✓ 支持' : '✗ 缺失';
     $('hasWS').className = (typeof WebSocket !== 'undefined') ? 'ok' : 'err';
     $('recMimes').textContent = caps.record.length
