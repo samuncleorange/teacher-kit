@@ -591,6 +591,12 @@
         setWebrtcStatus('学生端离线，无法连接', 'err');
         return;
       }
+      // iOS Safari refuses to autoplay <video> later (when MediaSource finally
+      // gets data) unless we trigger a play() inside the user-gesture frame
+      // that came from the click. Empty-source play() is harmless but locks
+      // the autoplay permission for the rest of this page lifetime.
+      try { remoteVideo.muted = true; remoteVideo.play().catch(() => {}); } catch (_) {}
+      try { remoteAudio.muted = false; remoteAudio.play().catch(() => {}); } catch (_) {}
       setWebrtcStatus('请求麦克风权限…');
       try {
         localStream = await navigator.mediaDevices.getUserMedia({

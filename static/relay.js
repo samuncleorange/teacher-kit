@@ -70,6 +70,21 @@
     return null;
   }
 
+  // Apple's ManagedMediaSource (iOS Safari) infamously reports video/webm
+  // as supported via isTypeSupported() but cannot actually decode it —
+  // sourceBuffer.appendBuffer either errors or silently produces no frames.
+  // We strip those entries from the decode list so the codec negotiator
+  // never picks webm-video for Safari peers.
+  // (Audio webm/opus *is* genuinely supported on Safari, leave it in.)
+  const SAFARI_DECODE_BLACKLIST = new Set([
+    'video/webm;codecs="vp8,opus"',
+    'video/webm;codecs=vp8,opus',
+    'video/webm;codecs="vp9,opus"',
+    'video/webm;codecs=vp9,opus',
+    'video/webm;codecs="h264,opus"',
+    'video/webm',
+  ]);
+
   // Discover capabilities of THIS browser.
   function discoverCaps() {
     const MSC = getMediaSourceCtor();
@@ -80,10 +95,10 @@
     try { out.ua = navigator.userAgent; } catch (_) {}
     out.mr = (typeof MediaRecorder !== 'undefined');
     out.ms = !!MSC;
-    if (MSC) {
-      out.msKind = (MSC === (typeof MediaSource !== 'undefined' && MediaSource))
-        ? 'MediaSource' : 'ManagedMediaSource';
-    }
+    const isManaged = !!MSC && (typeof ManagedMediaSource !== 'undefined') &&
+                      (MSC === ManagedMediaSource);
+    out.msKind = !MSC ? null : (isManaged ? 'ManagedMediaSource' : 'MediaSource');
+
     if (out.mr) {
       for (const m of ALL_MIMES) {
         try { if (MediaRecorder.isTypeSupported(m)) out.record.push(m); } catch (_) {}
@@ -91,6 +106,8 @@
     }
     if (MSC && typeof MSC.isTypeSupported === 'function') {
       for (const m of ALL_MIMES) {
+        // Trust-but-verify: filter out lying entries on Safari.
+        if (isManaged && SAFARI_DECODE_BLACKLIST.has(m)) continue;
         try { if (MSC.isTypeSupported(m)) out.decode.push(m); } catch (_) {}
       }
     }
