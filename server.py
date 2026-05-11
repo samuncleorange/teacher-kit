@@ -35,6 +35,7 @@ HOST = "0.0.0.0"
 ROOT = os.path.dirname(os.path.abspath(__file__))
 STATIC = os.path.join(ROOT, "static")
 SETTINGS_FILE = os.path.join(ROOT, "settings.json")
+STATE_FILE    = os.path.join(ROOT, "state.json")    # per-class trees (survives restart)
 
 GROW_DURATION_S = 60        # ≤ quietTarget for this many seconds → grow tree
 SHRINK_DURATION_S = 60      # ≥ loudTarget for this many seconds → remove tree
@@ -146,6 +147,7 @@ def is_in_schedule(schedule):
 # ============================================================
 
 _persist_lock = threading.Lock()
+_state_persist_lock = threading.Lock()
 
 
 def _load_persisted() -> dict:
@@ -164,7 +166,46 @@ def _save_persisted(snapshot: dict) -> None:
         os.replace(tmp, SETTINGS_FILE)
 
 
+def _load_persisted_state() -> dict:
+    try:
+        with open(STATE_FILE, "r", encoding="utf-8") as f:
+            return json.load(f)
+    except (FileNotFoundError, json.JSONDecodeError):
+        return {}
+
+
+def _save_persisted_state(snapshot: dict) -> None:
+    """Atomically write per-class trees to state.json."""
+    with _state_persist_lock:
+        tmp = STATE_FILE + ".tmp"
+        with open(tmp, "w", encoding="utf-8") as f:
+            json.dump(snapshot, f, ensure_ascii=False, indent=2)
+        os.replace(tmp, STATE_FILE)
+
+
 _persisted_settings = _load_persisted()
+_persisted_state    = _load_persisted_state()
+
+
+def _sanitize_trees(raw) -> "List[dict]":
+    """Defensive: ignore garbage entries from state.json on disk."""
+    if not isinstance(raw, list):
+        return []
+    out = []
+    for item in raw:
+        if not isinstance(item, dict):
+            continue
+        try:
+            level = int(item.get("level", 0))
+        except (TypeError, ValueError):
+            continue
+        if not (1 <= level <= MAX_LEVEL):
+            continue
+        tid = item.get("id")
+        if not isinstance(tid, str) or not tid:
+            tid = "t_" + uuid.uuid4().hex[:8]
+        out.append({"id": tid, "level": level})
+    return out
 
 
 # ============================================================
@@ -178,7 +219,8 @@ def uid() -> str:
 class ClassState:
     """In-memory state for one class (one PIN)."""
 
-    def __init__(self, pin: str, settings: Optional[dict] = None):
+    def __init__(self, pin: str, settings: Optional[dict] = None,
+                 trees: Optional[List[dict]] = None):
         self.pin = pin
         self.lock = threading.RLock()
         self.settings = dict(DEFAULT_SETTINGS)
@@ -192,7 +234,8 @@ class ClassState:
             )
         self.current_db: float = 0.0
         self.last_sample_at: float = 0.0
-        self.trees: List[dict] = []
+        # Trees survive restarts (loaded from state.json); streaks reset.
+        self.trees: List[dict] = _sanitize_trees(trees) if trees else []
         self.quiet_streak_start: Optional[float] = None
         self.loud_streak_start: Optional[float] = None
         self.alert_streak_start: Optional[float] = None
@@ -319,10 +362,12 @@ class ClassState:
         with self.lock:
             self.trees.append({"id": uid(), "level": 1})
             self._consolidate()
+        persist_all_state()
 
     def remove_tree(self) -> None:
         """Lose the most-recently-added smallest tree. If only larger trees
         exist, break one back down (1 large -> MERGE_COUNT-1 smaller)."""
+        changed = False
         with self.lock:
             if not self.trees:
                 return
@@ -335,9 +380,12 @@ class ClassState:
             if target_idx is None:
                 return
             target = self.trees.pop(target_idx)
+            changed = True
             if target["level"] > 1:
                 for _ in range(MERGE_COUNT - 1):
                     self.trees.append({"id": uid(), "level": target["level"] - 1})
+        if changed:
+            persist_all_state()
 
     # ---------- sample ingest ----------
 
@@ -345,6 +393,7 @@ class ClassState:
         now = time.time()
         bark_url_to_use = ""
         bark_payload = None
+        trees_changed = False
 
         with self.lock:
             # clamp
@@ -377,6 +426,7 @@ class ClassState:
                         self.trees.append({"id": uid(), "level": 1})
                         self._consolidate()
                         self.quiet_streak_start = now
+                        trees_changed = True
                 elif db >= loud_target:
                     if self.loud_streak_start is None:
                         self.loud_streak_start = now
@@ -392,6 +442,7 @@ class ClassState:
                                     break
                             if idx is not None:
                                 target = self.trees.pop(idx)
+                                trees_changed = True
                                 if target["level"] > 1:
                                     for _ in range(MERGE_COUNT - 1):
                                         self.trees.append(
@@ -428,6 +479,9 @@ class ClassState:
 
         if bark_url_to_use and bark_payload:
             send_bark_async(self, bark_url_to_use, bark_payload)
+
+        if trees_changed:
+            persist_all_state()
 
         self.broadcast()
 
@@ -478,7 +532,10 @@ def get_or_create_class(pin: str) -> ClassState:
     with _classes_lock:
         if pin not in CLASSES:
             persisted = _persisted_settings.get(pin)
-            CLASSES[pin] = ClassState(pin, persisted)
+            saved_state = _persisted_state.get(pin) or {}
+            CLASSES[pin] = ClassState(
+                pin, persisted, saved_state.get("trees")
+            )
         return CLASSES[pin]
 
 
@@ -486,6 +543,17 @@ def persist_all_settings() -> None:
     with _classes_lock:
         snapshot = {pin: dict(c.settings) for pin, c in CLASSES.items()}
     threading.Thread(target=_save_persisted, args=(snapshot,), daemon=True).start()
+
+
+def persist_all_state() -> None:
+    """Persist trees for every active class. Call after any change to trees."""
+    with _classes_lock:
+        snapshot = {
+            pin: {"trees": list(c.trees)}
+            for pin, c in CLASSES.items()
+            if c.trees  # don't bloat the file with empty classes
+        }
+    threading.Thread(target=_save_persisted_state, args=(snapshot,), daemon=True).start()
 
 
 # ============================================================
@@ -755,6 +823,7 @@ class Handler(http.server.BaseHTTPRequestHandler):
                 cls.quiet_streak_start = None
                 cls.loud_streak_start = None
                 cls.alert_streak_start = None
+            persist_all_state()
             cls.broadcast()
             return self._send_json({"ok": True})
 
